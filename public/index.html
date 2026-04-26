@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#000000">
+    <title>Awudio - AI Music Player</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Doto:wght@400;600&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="label">PERSONAL AI RADIO</p>
+          <div class="brand">AWUDIO</div>
+        </div>
+        <div class="signal-strip" aria-label="System signal">
+          <span id="brainStatus">[BRAIN: LOCAL]</span>
+          <span id="musicStatus">[MUSIC: DEMO]</span>
+          <span id="sourceValue">[SOURCE: DEMO]</span>
+          <span id="moodValue">[MOOD: RANDOM]</span>
+          <span id="cacheValue">[CACHE: PWA]</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="player-panel" aria-label="Player">
+          <div class="panel-heading">
+            <p class="label">NOW PLAYING</p>
+            <span id="playState">[IDLE]</span>
+          </div>
+
+          <div class="hero-block">
+            <h1 id="clockDisplay">00:00</h1>
+            <p id="trackInfo">ASK THE DJ</p>
+          </div>
+
+          <div class="meter-row">
+            <span id="currentTime">00:00</span>
+            <div class="segments" id="progressSegments" aria-label="Playback progress"></div>
+            <span id="duration">--:--</span>
+          </div>
+
+          <audio id="audio"></audio>
+
+          <div class="controls" aria-label="Player controls">
+            <button class="icon-button" id="prevButton" type="button" aria-label="Previous track" title="Previous">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 6l-9 6 9 6V6z"/></svg>
+            </button>
+            <button class="icon-button icon-button-primary" id="playButton" type="button" aria-label="Play" title="Play">
+              <svg id="playIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l9 6-9 6V6z"/></svg>
+            </button>
+            <button class="icon-button" id="nextButton" type="button" aria-label="Next track" title="Next">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l9 6-9 6V6z"/></svg>
+            </button>
+            <button class="control-button" id="likeButton" type="button">LIKE</button>
+            <button class="control-button" id="dislikeButton" type="button">SKIP</button>
+          </div>
+        </section>
+
+        <section class="request-panel" aria-label="Requests">
+          <div class="tabs" role="tablist" aria-label="Recommendation modes">
+            <button class="tab-button is-active" id="aiTab" type="button" role="tab" aria-selected="true" aria-controls="aiPane">AI DJ</button>
+            <button class="tab-button" id="searchTab" type="button" role="tab" aria-selected="false" aria-controls="searchPane">NETEASE</button>
+          </div>
+
+          <div class="tab-pane is-active" id="aiPane" role="tabpanel" aria-labelledby="aiTab">
+            <p class="label">AI CHAT RECOMMENDATION</p>
+            <textarea id="aiInput" rows="5" spellcheck="false">今天写代码，来点电子但别太吵</textarea>
+            <div class="request-actions">
+              <button class="primary-button" id="askButton" type="button">ASK DJ</button>
+              <button class="control-button" id="addAiButton" type="button">ADD PLAYABLE</button>
+            </div>
+            <div class="ai-output">
+              <p id="aiSay">[WAITING FOR INPUT]</p>
+              <p id="aiReason">AI 推荐会显示在这里；可播放歌曲可加入下方播放队列。</p>
+            </div>
+            <div class="result-header">
+              <p class="label">AI PLAYLIST</p>
+              <span id="aiResultCount">00 RESULTS</span>
+            </div>
+            <ol id="aiResultsList" class="result-list"></ol>
+          </div>
+
+          <div class="tab-pane" id="searchPane" role="tabpanel" aria-labelledby="searchTab">
+            <p class="label">NETEASE SEARCH</p>
+            <div class="search-row">
+              <input id="searchInput" type="search" value="蔡徐坤" autocomplete="off" spellcheck="false">
+              <button class="primary-button" id="searchButton" type="button">SEARCH</button>
+            </div>
+            <div class="request-actions">
+              <button class="control-button" id="addSearchButton" type="button">ADD PLAYABLE</button>
+            </div>
+            <div class="ai-output">
+              <p id="searchSay">[SEARCH READY]</p>
+              <p id="searchReason">搜索结果不会替换当前播放队列；点击 PLAY 结果可单独加入队列。</p>
+            </div>
+            <div class="result-header">
+              <p class="label">SEARCH RESULTS</p>
+              <span id="searchResultCount">00 RESULTS</span>
+            </div>
+            <ol id="searchResultsList" class="result-list"></ol>
+          </div>
+        </section>
+
+        <section class="queue-panel" aria-label="Queue">
+          <div class="panel-heading">
+            <p class="label">PLAY QUEUE</p>
+            <span id="queueCount">00 / 30</span>
+          </div>
+          <ol id="queueList" class="queue-list"></ol>
+          <div class="pager" aria-label="Queue pagination">
+            <button class="control-button" id="queuePrevPage" type="button">PREV</button>
+            <span id="queuePageInfo">PAGE 1 / 1</span>
+            <button class="control-button" id="queueNextPage" type="button">NEXT</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
