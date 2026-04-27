@@ -2,7 +2,6 @@ const audio = document.querySelector("#audio");
 const aiInput = document.querySelector("#aiInput");
 const aiComposer = document.querySelector("#aiComposer");
 const searchInput = document.querySelector("#searchInput");
-const askButton = document.querySelector("#askButton");
 const generatePlaylistButton = document.querySelector("#generatePlaylistButton");
 const clearAiChatButton = document.querySelector("#clearAiChatButton");
 const searchButton = document.querySelector("#searchButton");
@@ -37,6 +36,9 @@ const playState = document.querySelector("#playState");
 const currentTime = document.querySelector("#currentTime");
 const duration = document.querySelector("#duration");
 const progressSegments = document.querySelector("#progressSegments");
+const hostIntro = document.querySelector("#hostIntro");
+const hostIntroTime = document.querySelector("#hostIntroTime");
+const hostIntroText = document.querySelector("#hostIntroText");
 const queueList = document.querySelector("#queueList");
 const queueCount = document.querySelector("#queueCount");
 const queuePageInfo = document.querySelector("#queuePageInfo");
@@ -47,15 +49,12 @@ const playlistTracksList = document.querySelector("#playlistTracksList");
 const searchResultCount = document.querySelector("#searchResultCount");
 const playlistCount = document.querySelector("#playlistCount");
 const playlistTrackCount = document.querySelector("#playlistTrackCount");
-const aiSay = document.querySelector("#aiSay");
-const aiReason = document.querySelector("#aiReason");
 const searchSay = document.querySelector("#searchSay");
 const searchReason = document.querySelector("#searchReason");
 const playlistSay = document.querySelector("#playlistSay");
 const playlistReason = document.querySelector("#playlistReason");
 const neteaseAccount = document.querySelector("#neteaseAccount");
 const brainStatus = document.querySelector("#brainStatus");
-const aiStreamStatus = document.querySelector("#aiStreamStatus");
 const sourceValue = document.querySelector("#sourceValue");
 const moodValue = document.querySelector("#moodValue");
 
@@ -106,6 +105,7 @@ init();
 async function init() {
   renderSegments(0);
   renderAiChat();
+  resizeAiInput();
   tickClock();
   updateDateInfo();
   setInterval(tickClock, 1000);
@@ -170,6 +170,7 @@ function bindEvents() {
       void askDj();
     }
   });
+  aiInput.addEventListener("input", resizeAiInput);
   progressSegments.addEventListener("pointerdown", beginProgressSeek);
   progressSegments.addEventListener("keydown", handleProgressKeydown);
   document.addEventListener("click", closeQueueMenus);
@@ -181,6 +182,7 @@ function bindEvents() {
     playButton.setAttribute("aria-label", "暂停");
     playButton.title = "暂停";
     setPlayIcon(false);
+    updateHostIntroDisplay();
     void sendTaste("play");
   });
   audio.addEventListener("pause", () => {
@@ -188,12 +190,13 @@ function bindEvents() {
     playButton.setAttribute("aria-label", "播放");
     playButton.title = "播放";
     setPlayIcon(true);
+    updateHostIntroDisplay();
   });
   audio.addEventListener("ended", handleEnded);
   audio.addEventListener("error", () => {
     setPlayState("[音源错误]", false);
-    aiReason.textContent =
-      currentTrack?.blockReason || "当前音源无法播放，可能被浏览器或网易云上游拒绝。";
+    setTransientPlayState(currentTrack?.blockReason || "[音源错误]");
+    hideHostIntro();
   });
 }
 
@@ -240,10 +243,8 @@ async function askDj() {
   const userMessage = appendAiChatMessage("user", message);
   const assistantMessage = appendAiChatMessage("assistant", "");
   aiInput.value = "";
+  resizeAiInput();
   updateAiMessageStatus(assistantMessage.id, "streaming");
-  aiStreamStatus.textContent = "生成中";
-  aiSay.textContent = "[对话中]";
-  aiReason.textContent = "Awudio 正在读取偏好并生成推荐。";
   setBusy(true, "[思考中]");
 
   try {
@@ -254,12 +255,10 @@ async function askDj() {
   } catch (error) {
     const fallbackText = error.message || "AI 对话失败。";
     updateAiChatMessage(assistantMessage.id, fallbackText, { status: "error" });
-    aiSay.textContent = "[错误]";
-    aiReason.textContent = fallbackText;
     setTransientPlayState("[错误]");
     aiInput.value = userMessage.text;
+    resizeAiInput();
   } finally {
-    aiStreamStatus.textContent = "就绪";
     setBusy(false);
   }
 }
@@ -271,11 +270,11 @@ async function generateAiPlaylist() {
   const userMessage = appendAiChatMessage("user", `生成 30 首推荐歌单：${message}`);
   const assistantMessage = appendAiChatMessage("assistant", "");
 
-  if (rawMessage) aiInput.value = "";
+  if (rawMessage) {
+    aiInput.value = "";
+    resizeAiInput();
+  }
   updateAiMessageStatus(assistantMessage.id, "streaming");
-  aiStreamStatus.textContent = "生成歌单";
-  aiSay.textContent = "[生成歌单]";
-  aiReason.textContent = "Awudio 正在生成 30 首歌并替换右侧播放列表。";
   setBusy(true, "[生成歌单]");
 
   try {
@@ -287,12 +286,10 @@ async function generateAiPlaylist() {
   } catch (error) {
     const fallbackText = error.message || "生成推荐歌单失败。";
     updateAiChatMessage(assistantMessage.id, fallbackText, { status: "error" });
-    aiSay.textContent = "[错误]";
-    aiReason.textContent = fallbackText;
     setTransientPlayState("[错误]");
     aiInput.value = rawMessage || userMessage.text;
+    resizeAiInput();
   } finally {
-    aiStreamStatus.textContent = "就绪";
     setBusy(false);
   }
 }
@@ -346,7 +343,7 @@ async function streamDjResponse(message, assistantMessageId, conversation, optio
         if (event.type === "delta") {
           appendAiChatDelta(assistantMessageId, event.text || "");
         } else if (event.type === "status") {
-          aiStreamStatus.textContent = event.text || "生成中";
+          setTransientPlayState(event.text ? `[${event.text}]` : "[生成中]");
         } else if (event.type === "result") {
           receivedResult = true;
           applyDjResponse(event, assistantMessageId, options);
@@ -403,19 +400,16 @@ function applyDjResponse(data, assistantMessageId, options = {}) {
     tracks: chatTracks,
   });
 
-  aiSay.textContent = data.plan?.say ? `[${data.plan.say}]` : "[已生成]";
-  aiReason.textContent = getResultMessage(data.plan?.reason || "已生成 AI 推荐。", aiResults);
   moodValue.textContent = `[心情: ${translateMood(data.plan?.mood || "random")}]`;
   sourceValue.textContent = `[来源: ${translateSource(data.source?.music || "demo")}]`;
   if (options.replaceQueue || mode === "playlist") {
     replaceQueueWithTracks(aiResults);
-    aiReason.textContent = `${aiReason.textContent} 已替换右侧播放列表。`;
   }
 }
 
 function buildClientDjReply(plan, tracks) {
   const playableCount = tracks.filter(isPlayable).length;
-  const reason = plan?.reason || "已生成 AI 推荐。";
+  const reason = cleanAssistantText(plan?.reason || "已生成 AI 推荐。");
   return playableCount ? `${reason}\n找到 ${playableCount} 首可添加到队列的歌。` : reason;
 }
 
@@ -627,6 +621,7 @@ function playPrevious() {
 
 function playNext() {
   if (!queue.length) return;
+  if (shouldRecordSkip()) void sendTaste("skip");
   const nextIndex =
     playMode === "shuffle" ? findRandomPlayableIndex(currentIndex) : findNextPlayableIndex(currentIndex);
   if (nextIndex !== -1) playTrack(nextIndex);
@@ -634,17 +629,26 @@ function playNext() {
 
 function handleEnded() {
   if (playMode === "single") return;
+  void sendTaste("complete");
   playNext();
 }
 
-async function sendTaste(action) {
-  if (!currentTrack) return;
+async function sendTaste(action, track = currentTrack) {
+  if (!track) return;
 
   try {
-    await postJson("/api/taste", { action, track: currentTrack });
+    await postJson("/api/taste", { action, track, clientContext: getClientContext() });
   } catch {
     // Taste data is helpful, but playback should never depend on it.
   }
+}
+
+function shouldRecordSkip() {
+  if (!currentTrack || audio.paused || audio.ended) return false;
+  const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+  if (current < 20) return true;
+  return duration > 0 && current / duration < 0.35;
 }
 
 function likeTrack(track) {
@@ -657,7 +661,7 @@ function likeTrack(track) {
   if (currentTrack && trackKey(currentTrack) === trackKey(track)) {
     void sendTaste("like");
   } else {
-    void postJson("/api/taste", { action: "like", track }).catch(() => {});
+    void postJson("/api/taste", { action: "like", track, clientContext: getClientContext() }).catch(() => {});
   }
   renderQueue();
 }
@@ -765,7 +769,8 @@ function normalizeAiChatMessages(messages) {
     ? messages
         .map((message) => {
           const role = message?.role === "assistant" ? "assistant" : "user";
-          const text = String(message?.text || "").slice(0, 4000);
+          const rawText = String(message?.text || "").slice(0, 4000);
+          const text = role === "assistant" ? cleanAssistantText(rawText) : rawText;
           const id = String(message?.id || createMessageId(role));
           if (!text && message?.status !== "streaming") return null;
 
@@ -783,6 +788,15 @@ function normalizeAiChatMessages(messages) {
         .filter(Boolean)
         .slice(-MAX_AI_CHAT_MESSAGES)
     : [];
+}
+
+function cleanAssistantText(text) {
+  return String(text || "")
+    .replace(/^Faye[^\n]*\n/, "")
+    .replace(/^收到，我会按[^\n]*\n\n?/, "")
+    .replace(/优先从喜欢歌单选歌，并避开最近的[^\n。]*[。]?/g, "按你的喜欢歌单和相邻风格做了筛选。")
+    .replace(/\n先从 .+ 开始。$/s, "")
+    .trim();
 }
 
 function buildAiConversationPayload() {
@@ -847,9 +861,18 @@ function clearAiChat() {
   aiResults = [];
   saveAiChatMessages();
   renderAiChat();
-  aiSay.textContent = "[等待输入]";
-  aiReason.textContent = "AI 推荐会显示在这里；可播放歌曲可添加到播放队列。";
-  aiStreamStatus.textContent = "就绪";
+}
+
+function resizeAiInput() {
+  const styles = window.getComputedStyle(aiInput);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 22;
+  const paddingY = Number.parseFloat(styles.paddingTop) + Number.parseFloat(styles.paddingBottom);
+  const maxHeight = Math.ceil(lineHeight * 8 + paddingY);
+
+  aiInput.style.height = "0px";
+  const nextHeight = Math.min(Math.max(aiInput.scrollHeight, 24), maxHeight);
+  aiInput.style.height = `${nextHeight}px`;
+  aiInput.style.overflowY = aiInput.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function renderAiChat() {
@@ -858,7 +881,7 @@ function renderAiChat() {
   if (!aiChatMessages.length) {
     const empty = document.createElement("div");
     empty.className = "chat-empty";
-    empty.textContent = "等待你的下一次点歌。";
+    empty.textContent = "等你的下一次点歌。";
     aiChatHistory.append(empty);
     return;
   }
@@ -871,7 +894,7 @@ function renderAiChat() {
 
     const meta = document.createElement("div");
     meta.className = "chat-meta";
-    meta.textContent = `${message.role === "user" ? "你" : "Awudio"} · ${formatChatTime(message.at)}`;
+    meta.textContent = message.role === "user" ? `你 · ${formatChatTime(message.at)}` : `Faye · ${formatChatTime(message.at)}`;
 
     const body = document.createElement("div");
     body.className = "chat-bubble";
@@ -888,7 +911,7 @@ function renderAiChat() {
         card.innerHTML = `
           ${renderCover(track)}
           <div class="queue-title">
-            <strong>${escapeHtml(track.title || "未命名歌曲")}</strong>
+            <strong>${renderTrackTitle(track, "未命名歌曲")}</strong>
             <span>${escapeHtml(track.artist || "未知艺人")}</span>
           </div>
           <button class="mini-action" type="button" ${isPlayable(track) ? "" : "disabled"}>添加</button>
@@ -942,6 +965,7 @@ function closeQueueMenus(event) {
 function removeQueueItem(index) {
   if (index < 0 || index >= queue.length) return;
 
+  const removedTrack = queue[index];
   const removingCurrent = index === currentIndex;
   queue.splice(index, 1);
 
@@ -966,18 +990,67 @@ function removeQueueItem(index) {
   renderCurrentTrack();
   renderQueue();
   persistQueue();
+  if (removedTrack) void sendTaste("remove", removedTrack);
 }
 
 function renderCurrentTrack() {
   if (!currentTrack) {
     trackInfo.textContent = "等待推荐或搜索";
+    hideHostIntro();
     setPlayState("[空闲]", false);
     return;
   }
 
   trackInfo.textContent =
     [currentTrack.title, currentTrack.artist].filter(Boolean).join(" - ") || "未知歌曲";
+  updateHostIntroDisplay();
   refreshPlayStateForCurrent();
+}
+
+function updateHostIntroDisplay() {
+  if (!hostIntro || !hostIntroText || !hostIntroTime) return;
+
+  const intro = getHostIntro(currentTrack);
+  if (!intro || !audio.currentSrc) {
+    hideHostIntro();
+    return;
+  }
+
+  const currentMs = Number.isFinite(audio.currentTime) ? audio.currentTime * 1000 : 0;
+  const startAtMs = Number(intro.startAtMs) || 0;
+  const durationMs = Number(intro.estimatedDurationMs) || estimateClientHostIntroDurationMs(intro.displayText);
+  const endAtMs = startAtMs + durationMs;
+
+  if (currentMs < startAtMs || currentMs > endAtMs) {
+    hideHostIntro();
+    return;
+  }
+
+  hostIntroTime.textContent = formatTime(startAtMs / 1000);
+  hostIntroText.textContent = intro.displayText;
+  hostIntro.hidden = false;
+}
+
+function hideHostIntro() {
+  if (!hostIntro || !hostIntroText) return;
+  hostIntro.hidden = true;
+  hostIntroText.textContent = "";
+}
+
+function getHostIntro(track) {
+  return hasHostIntro(track) ? track.hostIntro : null;
+}
+
+function hasHostIntro(track) {
+  return Boolean(track?.hostIntro?.enabled && track.hostIntro.displayText);
+}
+
+function renderTrackTitle(track, fallback = "未命名") {
+  const title = escapeHtml(track?.title || fallback);
+  const dot = hasHostIntro(track)
+    ? '<span class="host-dot" aria-label="有讲解" title="有讲解"></span>'
+    : "";
+  return `${title}${dot}`;
 }
 
 function renderQueue() {
@@ -1015,7 +1088,7 @@ function renderQueue() {
       <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
       ${renderCover(track)}
       <div class="queue-title">
-        <strong>${escapeHtml(track.title || "未命名")}</strong>
+        <strong>${renderTrackTitle(track, "未命名")}</strong>
         <span>${escapeHtml([track.artist, track.album].filter(Boolean).join(" / ") || "未知艺人")}</span>
       </div>
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
@@ -1080,7 +1153,7 @@ function renderResults(listElement, countElement, tracks, unit = "条结果") {
       <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
       ${renderCover(track)}
       <div class="queue-title">
-        <strong>${escapeHtml(track.title || "未命名")}</strong>
+        <strong>${renderTrackTitle(track, "未命名")}</strong>
         <span>${escapeHtml(track.artist || "未知艺人")}${track.blockReason ? ` / ${escapeHtml(track.blockReason)}` : ""}</span>
       </div>
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
@@ -1130,6 +1203,7 @@ function updateProgress() {
   duration.textContent = total ? formatTime(total) : "--:--";
   progressSegments.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
   renderSegments(ratio);
+  updateHostIntroDisplay();
 }
 
 function beginProgressSeek(event) {
@@ -1219,7 +1293,6 @@ function syncQueuePageToCurrent() {
 }
 
 function setBusy(isBusy, state = null) {
-  askButton.disabled = isBusy;
   generatePlaylistButton.disabled = isBusy;
   clearAiChatButton.disabled = isBusy;
   searchButton.disabled = isBusy;
@@ -1396,7 +1469,41 @@ function normalizeClientTrack(track) {
     br: Number(track.br) || 0,
     sourceCode: Number(track.sourceCode) || 0,
     tags: Array.isArray(track.tags) ? track.tags : [],
+    hostIntro: normalizeClientHostIntro(track.hostIntro),
   };
+}
+
+function normalizeClientHostIntro(value) {
+  if (!value || typeof value !== "object") return null;
+
+  const displayText = String(value.displayText || value.text || "").trim().slice(0, 420);
+  if (!displayText) return null;
+
+  return {
+    enabled: value.enabled !== false,
+    startAtMs: clampMilliseconds(value.startAtMs, 0, 0, 60000),
+    estimatedDurationMs: clampMilliseconds(
+      value.estimatedDurationMs,
+      estimateClientHostIntroDurationMs(displayText),
+      12000,
+      90000,
+    ),
+    displayText,
+    tone: String(value.tone || "context").slice(0, 32),
+    moodIntent: String(value.moodIntent || "random").slice(0, 32),
+    source: String(value.source || "").slice(0, 40),
+  };
+}
+
+function estimateClientHostIntroDurationMs(text) {
+  const charCount = String(text || "").replace(/\s+/g, "").length;
+  return Math.max(12000, Math.min(90000, Math.round((charCount / 4.2) * 1000)));
+}
+
+function clampMilliseconds(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(number)));
 }
 
 function normalizeVolume(value) {
@@ -1568,6 +1675,7 @@ function translateSource(value) {
   const map = {
     netease: "网易云",
     demo: "演示",
+    library: "本地曲库",
   };
   return map[value] || value;
 }

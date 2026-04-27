@@ -41,6 +41,11 @@
             <p id="trackInfo">等待推荐或搜索</p>
           </div>
 
+          <div class="host-intro" id="hostIntro" aria-live="polite" hidden>
+            <span id="hostIntroTime">00:00</span>
+            <p id="hostIntroText"></p>
+          </div>
+
           <div class="meter-row">
             <span id="currentTime">00:00</span>
             <div class="segments" id="progressSegments" aria-label="播放进度" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
@@ -92,22 +97,19 @@
 
           <div class="tab-pane is-active" id="aiPane" role="tabpanel" aria-labelledby="aiTab">
             <div class="chat-toolbar">
-              <p class="label">AI 对话推荐</p>
-              <span id="aiStreamStatus">就绪</span>
+              <button class="round-icon-button pixel-plus-button" id="clearAiChatButton" type="button" aria-label="新对话" title="新对话">
+                <span aria-hidden="true"></span>
+              </button>
+              <button class="round-icon-button pixel-spark-button" id="generatePlaylistButton" type="button" aria-label="生成推荐歌单" title="生成推荐歌单">
+                <span aria-hidden="true"></span>
+              </button>
             </div>
             <div class="chat-history" id="aiChatHistory" aria-live="polite" aria-label="AI 对话记录"></div>
             <form class="chat-composer" id="aiComposer">
-              <textarea id="aiInput" rows="3" spellcheck="false" placeholder="告诉 Awudio 你现在想听什么">今天写代码，来点电子但别太吵</textarea>
-              <div class="request-actions">
-                <button class="primary-button" id="askButton" type="submit">发送</button>
-                <button class="primary-button" id="generatePlaylistButton" type="button">生成推荐歌单</button>
-                <button class="control-button" id="clearAiChatButton" type="button">新对话</button>
+              <div class="chat-input-shell">
+                <textarea id="aiInput" rows="1" spellcheck="false" placeholder="告诉我你现在想听什么">今天写代码，来点电子但别太吵</textarea>
               </div>
             </form>
-            <div class="ai-output ai-output-compact">
-              <p id="aiSay">[等待输入]</p>
-              <p id="aiReason">AI 推荐会显示在这里；可播放歌曲可添加到播放队列。</p>
-            </div>
           </div>
 
           <div class="tab-pane" id="searchPane" role="tabpanel" aria-labelledby="searchTab">
