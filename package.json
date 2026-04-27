@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
+    "profile:ncm": "node scripts/distill-ncm-profile.mjs",
     "ncm": "npx NeteaseCloudMusicApi@latest"
   },
   "engines": {
