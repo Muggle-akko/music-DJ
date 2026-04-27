@@ -3,6 +3,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
+import { createHash } from "node:crypto";
 
 const ROOT = resolve(".");
 loadEnvFile(resolve(ROOT, ".env"));
@@ -12,6 +13,7 @@ const PUBLIC_DIR = resolve(ROOT, "public");
 const DATA_DIR = resolve(ROOT, "data");
 const STATE_FILE = resolve(DATA_DIR, "state.json");
 const LISTENING_PROFILE_FILE = resolve(DATA_DIR, "listening-profile.json");
+const TTS_CACHE_DIR = resolve(DATA_DIR, "tts");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
@@ -21,11 +23,19 @@ const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 const AI_PROVIDER = resolveAiProvider();
 const NCM_API_BASE = trimTrailingSlash(process.env.NCM_API_BASE || "");
 const NCM_COOKIE = process.env.NCM_COOKIE || "";
+const FISH_AUDIO_API_KEY = process.env.FISH_AUDIO_API_KEY || process.env.FISH_API_KEY || "";
+const FISH_AUDIO_TTS_URL = process.env.FISH_AUDIO_TTS_URL || "https://api.fish.audio/v1/tts";
+const FISH_AUDIO_MODEL = process.env.FISH_AUDIO_MODEL || "s2-pro";
+const FISH_AUDIO_REFERENCE_ID = process.env.FISH_AUDIO_REFERENCE_ID || process.env.FISH_AUDIO_VOICE_ID || process.env.REFERENCE_ID || "";
+const FISH_AUDIO_LATENCY = process.env.FISH_AUDIO_LATENCY || "normal";
+const FISH_AUDIO_SPEED = clampFloat(process.env.FISH_AUDIO_SPEED, 1, 0.75, 1.25);
+const TTS_PROVIDER = resolveTtsProvider();
 const NCM_SEARCH_PROBE_LIMIT = 12;
 const NCM_SIMILAR_SEED_LIMIT = 3;
 const NCM_DAILY_RECOMMEND_LIMIT = 30;
 const MAX_RECOMMENDATION_DURATION_MS = 12 * 60 * 1000;
 const MAX_QUEUE = 200;
+const MAX_RADIO_HISTORY = 40;
 const PROFILE_RECOMMENDATION_LIKED_RATIO = 0.82;
 const PROFILE_RECOMMENDATION_CANDIDATE_LIMIT = 120;
 const CHAT_RECOMMENDATION_LIMIT = 3;
@@ -104,6 +114,9 @@ const CONTENT_TYPES = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".opus": "audio/ogg",
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
@@ -121,6 +134,7 @@ const DEFAULT_STATE = {
   queue: [],
   queueCurrentIndex: -1,
   queueUpdatedAt: null,
+  radioHistory: [],
   now: null,
   updatedAt: null,
 };
@@ -210,14 +224,14 @@ const HOST_INTRO_INSTRUCTIONS = [
   "You are Faye, a warm, observant radio host for Awudio.",
   "Return only valid JSON. No markdown, no comments.",
   "Schema:",
-  '{"items":[{"trackId":"exact track id from input","index":0,"startAtMs":0,"displayText":"Chinese radio host intro, 90-260 chars","tone":"comfort|context|energy|night|focus","reason":"short reason for choosing this song"}]}',
+  '{"items":[{"trackId":"exact track id from input","index":0,"startAtMs":0,"displayText":"Chinese radio host intro, 180-520 chars","tone":"comfort|context|energy|night|focus","reason":"short reason for choosing this song"}]}',
   "Generate host intros for at least targetCount tracks. More is acceptable when the playlist flow benefits from it.",
   "Prefer songs that feel like good radio entry points, mood turns, familiar anchors, emotional pauses, or songs whose artist/title/album/tags give you something concrete to say.",
   "Use the user's current request, mood, time, weather, song title, artist, album, tags, and any known music facts already present in the input.",
   "If you know a widely established fact about the artist, song, album, era, style, or background, you may mention it. If you are not sure, say it as listening context or feeling instead of inventing facts.",
   "The intro will appear near the beginning of the song, so startAtMs should usually be 0.",
   "Make the Chinese copy feel like a real radio host speaking to one listener: natural, paced, a little informative, emotionally aware, and not like an encyclopedia card.",
-  "The intro can be longer than a subtitle. It should sound speakable in 15-50 seconds.",
+  "The intro can be longer than a subtitle. It should sound speakable in 25-90 seconds when the song deserves context.",
   "Blend three layers when possible: why this song is here, one bit of artist/song/style/background context, and what the listener can notice or feel when the music begins.",
   "If the user's request implies tiredness, stress, loneliness, or low mood, make several intros quietly comforting without becoming generic motivational copy.",
   "Avoid repeated openings such as '接下来这首'. Avoid naming sources or saying you searched.",
@@ -227,6 +241,7 @@ const HOST_INTRO_INSTRUCTIONS = [
 ].join("\n");
 
 await mkdir(DATA_DIR, { recursive: true });
+await mkdir(TTS_CACHE_DIR, { recursive: true });
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -251,6 +266,7 @@ server.listen(PORT, () => {
   console.log(`Awudio MVP running at http://localhost:${PORT}`);
   console.log(`AI brain: ${describeAiBrain()}`);
   console.log(`Netease adapter: ${NCM_API_BASE || "demo mode"}`);
+  console.log(`Voice pipeline: ${TTS_PROVIDER}${TTS_PROVIDER === "fish" ? `:${FISH_AUDIO_MODEL}` : " fallback"}`);
 });
 
 async function routeApi(req, res, url) {
@@ -265,8 +281,15 @@ async function routeApi(req, res, url) {
       openaiModel: OPENAI_MODEL,
       ncm: Boolean(NCM_API_BASE),
       ncmBase: NCM_API_BASE || null,
+      tts: {
+        provider: TTS_PROVIDER,
+        fishAudio: Boolean(FISH_AUDIO_API_KEY),
+        fishAudioVoice: Boolean(FISH_AUDIO_REFERENCE_ID),
+        model: TTS_PROVIDER === "fish" ? FISH_AUDIO_MODEL : null,
+        browserFallback: true,
+      },
       mode: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
-      serverBuild: "awudio-server-v9",
+      serverBuild: "awudio-server-v12",
       features: {
         queue: true,
         playlists: true,
@@ -274,6 +297,9 @@ async function routeApi(req, res, url) {
         chatStream: true,
         playlistGeneration: true,
         hostIntros: true,
+        voicePipeline: true,
+        voiceDucking: true,
+        radioHistory: true,
       },
     });
     return;
@@ -289,6 +315,19 @@ async function routeApi(req, res, url) {
     const state = await readState();
     const queueState = normalizeQueueState(state.queue, state.queueCurrentIndex);
     sendJson(res, 200, { ok: true, ...queueState, updatedAt: state.queueUpdatedAt || null });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/radios") {
+    const state = await readState();
+    const radios = normalizeRadioHistory(state.radioHistory || []);
+    if (radios.length !== (state.radioHistory || []).length) {
+      state.radioHistory = radios;
+      state.updatedAt = new Date().toISOString();
+      await writeState(state);
+    }
+
+    sendJson(res, 200, { ok: true, radios, count: radios.length });
     return;
   }
 
@@ -389,6 +428,18 @@ async function routeApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/music/stream") {
     await streamNcmTrack(req, res, url);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/tts") {
+    const body = await readJsonBody(req);
+    const voiceCue = await synthesizeVoiceCue(body);
+    sendJson(res, 200, voiceCue);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/tts/audio/")) {
+    await serveTtsAudio(res, url.pathname);
     return;
   }
 
@@ -505,6 +556,174 @@ async function routeApi(req, res, url) {
   sendJson(res, 404, { ok: false, error: "Not found" });
 }
 
+async function synthesizeVoiceCue(body = {}) {
+  const text = normalizeTtsText(body.text || body.displayText || body.say || "");
+  if (!text) {
+    return {
+      ok: false,
+      error: "text is required",
+    };
+  }
+
+  const speed = clampFloat(body.speed, FISH_AUDIO_SPEED, 0.75, 1.25);
+  const durationMs = clampMs(body.durationMs || body.estimatedDurationMs, estimateHostIntroDurationMs(text), 12000, 180000);
+  const baseCue = {
+    ok: true,
+    text,
+    speed,
+    durationMs,
+    estimatedDurationMs: durationMs,
+    ducking: {
+      targetRatio: 0.16,
+      fadeOutMs: 750,
+      fadeInMs: 1400,
+    },
+  };
+
+  if (TTS_PROVIDER !== "fish") {
+    return {
+      ...baseCue,
+      provider: "browser",
+      fallback: true,
+      status: "ready",
+      voiceCueId: createVoiceCueId({ provider: "browser", text, speed }),
+      audioUrl: null,
+      reason: FISH_AUDIO_API_KEY ? "Fish Audio voice id is not configured" : "Fish Audio API key is not configured",
+    };
+  }
+
+  try {
+    const result = await synthesizeFishAudio(text, { speed });
+    return {
+      ...baseCue,
+      ...result,
+      provider: "fish",
+      fallback: false,
+      status: "ready",
+    };
+  } catch (error) {
+    return {
+      ...baseCue,
+      provider: "browser",
+      fallback: true,
+      status: "ready",
+      voiceCueId: createVoiceCueId({ provider: "browser", text, speed }),
+      audioUrl: null,
+      error: error instanceof Error ? error.message : "Fish Audio TTS failed",
+    };
+  }
+}
+
+async function synthesizeFishAudio(text, options = {}) {
+  const speed = clampFloat(options.speed, FISH_AUDIO_SPEED, 0.75, 1.25);
+  const cachePayload = {
+    provider: "fish",
+    text,
+    model: FISH_AUDIO_MODEL,
+    referenceId: FISH_AUDIO_REFERENCE_ID,
+    latency: FISH_AUDIO_LATENCY,
+    speed,
+    format: "mp3",
+  };
+  const voiceCueId = createVoiceCueId(cachePayload);
+  const fileName = `${voiceCueId}.mp3`;
+  const filePath = resolve(TTS_CACHE_DIR, fileName);
+  const audioUrl = `/api/tts/audio/${fileName}`;
+
+  if (existsSync(filePath)) {
+    return {
+      voiceCueId,
+      audioUrl,
+      cacheHit: true,
+      model: FISH_AUDIO_MODEL,
+      voiceId: FISH_AUDIO_REFERENCE_ID,
+    };
+  }
+
+  if (!FISH_AUDIO_API_KEY) throw new Error("FISH_AUDIO_API_KEY is not configured");
+  if (!FISH_AUDIO_REFERENCE_ID) throw new Error("FISH_AUDIO_REFERENCE_ID is not configured");
+
+  const response = await fetch(FISH_AUDIO_TTS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${FISH_AUDIO_API_KEY}`,
+      "Content-Type": "application/json",
+      model: FISH_AUDIO_MODEL,
+      Accept: "audio/mpeg",
+    },
+    body: JSON.stringify({
+      text,
+      reference_id: FISH_AUDIO_REFERENCE_ID,
+      temperature: 0.7,
+      top_p: 0.7,
+      format: "mp3",
+      sample_rate: 44100,
+      mp3_bitrate: 128,
+      latency: FISH_AUDIO_LATENCY,
+      chunk_length: 300,
+      normalize: true,
+      max_new_tokens: 1024,
+      repetition_penalty: 1.2,
+      min_chunk_length: 50,
+      condition_on_previous_chunks: true,
+      early_stop_threshold: 1,
+      prosody: {
+        speed,
+        volume: 0,
+        normalize_loudness: true,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Fish Audio HTTP ${response.status}${detail ? `: ${detail.slice(0, 180)}` : ""}`);
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length) throw new Error("Fish Audio returned empty audio");
+  await writeFile(filePath, bytes);
+
+  return {
+    voiceCueId,
+    audioUrl,
+    cacheHit: false,
+    model: FISH_AUDIO_MODEL,
+    voiceId: FISH_AUDIO_REFERENCE_ID,
+  };
+}
+
+async function serveTtsAudio(res, pathname) {
+  const rawName = decodeURIComponent(pathname.replace("/api/tts/audio/", ""));
+  if (!/^[a-f0-9]{64}\.(mp3|wav|opus)$/.test(rawName)) {
+    sendJson(res, 400, { ok: false, error: "Invalid audio file" });
+    return;
+  }
+
+  const filePath = resolve(TTS_CACHE_DIR, rawName);
+  if (!filePath.startsWith(TTS_CACHE_DIR) || !existsSync(filePath)) {
+    sendJson(res, 404, { ok: false, error: "TTS audio not found" });
+    return;
+  }
+
+  const body = await readFile(filePath);
+  const type = CONTENT_TYPES[extname(filePath)] || "audio/mpeg";
+  res.writeHead(200, {
+    "Content-Type": type,
+    "Cache-Control": "public, max-age=31536000, immutable",
+    "Content-Length": String(body.length),
+  });
+  res.end(body);
+}
+
+function normalizeTtsText(text) {
+  return cleanHostIntroText(text).slice(0, 1200);
+}
+
+function createVoiceCueId(payload) {
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
 async function streamDjChatResponse(res, message, conversation, requestOptions = {}) {
   res.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -586,6 +805,11 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
       tasteContext,
       clientContext,
     });
+
+    if (tracks.some((track) => track.hostIntro?.displayText)) {
+      await options.onStatus?.("缓存主持人语音");
+      tracks = await attachVoiceCuesToHostIntros(tracks);
+    }
   }
 
   const selected = tracks.find((track) => track.playable) || tracks[0] || null;
@@ -607,6 +831,23 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
         startedAt: now,
       }
     : null;
+  let radioHistoryItem = null;
+  if (executionMode === "playlist" && tracks.some((track) => track.playable && track.url)) {
+    radioHistoryItem = createRadioHistoryItem({
+      message,
+      plan,
+      tracks,
+      assistantText,
+      source: {
+        brain: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
+        music: getTrackSource(tracks),
+        tts: TTS_PROVIDER,
+      },
+      createdAt: now,
+    });
+    state.radioHistory = normalizeRadioHistory([radioHistoryItem, ...(state.radioHistory || [])]);
+  }
+
   state.updatedAt = now;
   await writeState(state);
 
@@ -619,6 +860,7 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     route,
     plan,
     tracks,
+    radioHistoryItem,
     assistantText,
     tasteContext: summarizeTasteContext(tasteContext),
     source: {
@@ -648,6 +890,57 @@ function buildDjReply(plan, tracks, options = {}) {
   }
 
   return lines.join("\n");
+}
+
+function createRadioHistoryItem({ message, plan, tracks, assistantText, source, createdAt }) {
+  const normalizedTracks = normalizeRadioTracks(tracks);
+  const introCount = normalizedTracks.filter((track) => track.hostIntro?.displayText).length;
+  const voiceCount = normalizedTracks.filter((track) => track.hostIntro?.audioUrl).length;
+  const id = createRadioHistoryId({ createdAt, message, tracks: normalizedTracks });
+
+  return {
+    id,
+    title: buildRadioHistoryTitle(message, plan, createdAt),
+    createdAt,
+    updatedAt: createdAt,
+    request: String(message || "").slice(0, 360),
+    mood: String(plan?.mood || "random").slice(0, 32),
+    say: cleanVisibleDjLine(plan?.say || "").slice(0, 120),
+    reason: cleanVisibleDjLine(plan?.reason || "").slice(0, 240),
+    assistantText: String(assistantText || "").slice(0, 1200),
+    trackCount: normalizedTracks.length,
+    introCount,
+    voiceCount,
+    source: normalizeRadioSource(source),
+    tracks: normalizedTracks,
+  };
+}
+
+function buildRadioHistoryTitle(message, plan, createdAt) {
+  const text = cleanVisibleDjLine(plan?.say || message || "").replace(/^生成\s*\d*\s*首推荐歌单[:：]?/, "").trim();
+  const base = text || "AI 电台歌单";
+  return `${base.slice(0, 28)} / ${formatRadioCreatedAt(createdAt)}`;
+}
+
+function createRadioHistoryId(payload) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      createdAt: payload.createdAt,
+      message: payload.message,
+      tracks: payload.tracks.map((track) => [track.provider, track.id, track.title, track.artist]),
+    }))
+    .digest("hex")
+    .slice(0, 20);
+}
+
+function formatRadioCreatedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知时间";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${month}.${day} ${hours}:${minutes}`;
 }
 
 async function attachHostIntrosToPlaylistTracks(tracks, context = {}) {
@@ -718,7 +1011,7 @@ async function createDeepSeekHostIntroItems(payload) {
       response_format: { type: "json_object" },
       thinking: { type: "disabled" },
       temperature: 0.55,
-      max_tokens: 3600,
+      max_tokens: 6000,
       stream: false,
     }),
   });
@@ -741,7 +1034,7 @@ async function createOpenAiHostIntroItems(payload) {
       model: OPENAI_MODEL,
       instructions: HOST_INTRO_INSTRUCTIONS,
       input: JSON.stringify(payload),
-      max_output_tokens: 3600,
+      max_output_tokens: 6000,
       store: false,
     }),
   });
@@ -792,14 +1085,26 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
       ...result[match.index],
       hostIntro: {
         enabled: true,
+        voiceCueId: createVoiceCueId({
+          trackId: match.track.id || match.index,
+          startAtMs: clampMs(item.startAtMs, 0, 0, 60000),
+          text: displayText,
+        }),
         startAtMs: clampMs(item.startAtMs, 0, 0, 60000),
         estimatedDurationMs: clampMs(
           item.estimatedDurationMs,
           estimateHostIntroDurationMs(displayText),
           12000,
-          90000,
+          180000,
         ),
         displayText,
+        audioUrl: "",
+        status: "pending",
+        ducking: {
+          targetRatio: 0.16,
+          fadeOutMs: 750,
+          fadeInMs: 1400,
+        },
         tone: String(item.tone || "context").slice(0, 32),
         moodIntent: String(context.plan?.mood || item.moodIntent || "random").slice(0, 32),
         source: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
@@ -808,6 +1113,58 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
   }
 
   return result;
+}
+
+async function attachVoiceCuesToHostIntros(tracks) {
+  const result = tracks.map((track) => ({ ...track }));
+  const jobs = result
+    .map((track, index) => ({ track, index }))
+    .filter(({ track }) => track.hostIntro?.enabled && track.hostIntro?.displayText);
+
+  for (const batch of chunkArray(jobs, 2)) {
+    const settled = await Promise.allSettled(
+      batch.map(({ track }) =>
+        synthesizeVoiceCue({
+          text: track.hostIntro.displayText,
+          trackId: track.id,
+          title: track.title,
+          artist: track.artist,
+          tone: track.hostIntro.tone,
+          moodIntent: track.hostIntro.moodIntent,
+          estimatedDurationMs: track.hostIntro.estimatedDurationMs,
+        }),
+      ),
+    );
+
+    settled.forEach((item, offset) => {
+      const job = batch[offset];
+      if (!job || item.status !== "fulfilled" || !item.value) return;
+      result[job.index] = applyVoiceCueToTrack(result[job.index], item.value);
+    });
+  }
+
+  return result;
+}
+
+function applyVoiceCueToTrack(track, cue) {
+  if (!track?.hostIntro) return track;
+
+  return {
+    ...track,
+    hostIntro: {
+      ...track.hostIntro,
+      voiceCueId: String(cue.voiceCueId || track.hostIntro.voiceCueId || "").slice(0, 90),
+      audioUrl: String(cue.audioUrl || track.hostIntro.audioUrl || "").slice(0, 500),
+      status: String(cue.status || "ready").slice(0, 32),
+      provider: String(cue.provider || TTS_PROVIDER || "").slice(0, 40),
+      fallback: Boolean(cue.fallback),
+      cacheHit: Boolean(cue.cacheHit),
+      model: String(cue.model || "").slice(0, 80),
+      voiceId: String(cue.voiceId || "").slice(0, 120),
+      speed: clampFloat(cue.speed || track.hostIntro.speed, FISH_AUDIO_SPEED, 0.75, 1.25),
+      ducking: normalizeVoiceDucking(cue.ducking || track.hostIntro.ducking),
+    },
+  };
 }
 
 function normalizeHostIntroItems(items) {
@@ -898,12 +1255,12 @@ function cleanHostIntroText(text) {
     .replace(/^下面[，,。\s]*/, "")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 420);
+    .slice(0, 1200);
 }
 
 function estimateHostIntroDurationMs(text) {
   const charCount = String(text || "").replace(/\s+/g, "").length;
-  return Math.max(12000, Math.min(90000, Math.round((charCount / 4.2) * 1000)));
+  return Math.max(12000, Math.min(180000, Math.round((charCount / 4.2) * 1000)));
 }
 
 function clampMs(value, fallback, min, max) {
@@ -3500,7 +3857,7 @@ function normalizeRecommendationLimit(value, mode) {
 }
 
 function mergeState(raw) {
-  return {
+  const merged = {
     ...DEFAULT_STATE,
     ...raw,
     tasteProfile: {
@@ -3508,6 +3865,68 @@ function mergeState(raw) {
       ...(raw?.tasteProfile || {}),
     },
   };
+
+  merged.radioHistory = normalizeRadioHistory(merged.radioHistory || []);
+  return merged;
+}
+
+function normalizeRadioHistory(items) {
+  return Array.isArray(items)
+    ? items
+        .map(normalizeRadioHistoryItem)
+        .filter(Boolean)
+        .slice(0, MAX_RADIO_HISTORY)
+    : [];
+}
+
+function normalizeRadioHistoryItem(item) {
+  if (!item || typeof item !== "object") return null;
+
+  const createdAt = normalizeIsoDate(item.createdAt) || new Date().toISOString();
+  const tracks = normalizeRadioTracks(item.tracks || []);
+  if (!tracks.length) return null;
+
+  const introCount = tracks.filter((track) => track.hostIntro?.displayText).length;
+  const voiceCount = tracks.filter((track) => track.hostIntro?.audioUrl).length;
+
+  return {
+    id: String(item.id || createRadioHistoryId({ createdAt, message: item.request || item.title || "", tracks })).slice(0, 80),
+    title: String(item.title || buildRadioHistoryTitle(item.request || "", { say: item.say || "" }, createdAt)).slice(0, 120),
+    createdAt,
+    updatedAt: normalizeIsoDate(item.updatedAt) || createdAt,
+    request: String(item.request || "").slice(0, 360),
+    mood: String(item.mood || "random").slice(0, 32),
+    say: cleanVisibleDjLine(item.say || "").slice(0, 120),
+    reason: cleanVisibleDjLine(item.reason || "").slice(0, 240),
+    assistantText: String(item.assistantText || "").slice(0, 1200),
+    trackCount: tracks.length,
+    introCount,
+    voiceCount,
+    source: normalizeRadioSource(item.source),
+    tracks,
+  };
+}
+
+function normalizeRadioTracks(tracks) {
+  return Array.isArray(tracks)
+    ? tracks
+        .map(normalizeQueueTrack)
+        .filter((track) => track && track.playable && track.url)
+        .slice(0, PLAYLIST_RECOMMENDATION_LIMIT)
+    : [];
+}
+
+function normalizeRadioSource(source = {}) {
+  return {
+    brain: String(source?.brain || "").slice(0, 80),
+    music: String(source?.music || "").slice(0, 80),
+    tts: String(source?.tts || TTS_PROVIDER || "").slice(0, 80),
+  };
+}
+
+function normalizeIsoDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 async function readListeningProfile() {
@@ -3610,17 +4029,40 @@ function normalizeQueueHostIntro(value) {
 
   return {
     enabled: value.enabled !== false,
+    voiceCueId: String(value.voiceCueId || "").slice(0, 90),
     startAtMs: clampMs(value.startAtMs, 0, 0, 60000),
     estimatedDurationMs: clampMs(
       value.estimatedDurationMs,
       estimateHostIntroDurationMs(displayText),
       12000,
-      90000,
+      180000,
     ),
     displayText,
+    audioUrl: String(value.audioUrl || "").slice(0, 500),
+    status: String(value.status || "pending").slice(0, 32),
+    provider: String(value.provider || "").slice(0, 40),
+    fallback: Boolean(value.fallback),
+    cacheHit: Boolean(value.cacheHit),
+    model: String(value.model || "").slice(0, 80),
+    voiceId: String(value.voiceId || "").slice(0, 120),
+    speed: clampFloat(value.speed, 0, 0, 1.5),
+    ducking: normalizeVoiceDucking(value.ducking),
     tone: String(value.tone || "context").slice(0, 32),
     moodIntent: String(value.moodIntent || "random").slice(0, 32),
     source: String(value.source || "").slice(0, 40),
+  };
+}
+
+function normalizeVoiceDucking(value = {}) {
+  const targetRatio = Number(value.targetRatio);
+  const cappedTargetRatio = Number.isFinite(targetRatio)
+    ? Math.min(targetRatio, 0.16)
+    : 0.16;
+
+  return {
+    targetRatio: clampFloat(cappedTargetRatio, 0.16, 0.08, 0.9),
+    fadeOutMs: clampMs(value.fadeOutMs, 750, 0, 5000),
+    fadeInMs: clampMs(value.fadeInMs, 1400, 0, 8000),
   };
 }
 
@@ -3633,6 +4075,12 @@ function clampNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(number)));
+}
+
+function clampFloat(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }
 
 function getTrackSource(tracks) {
@@ -3680,6 +4128,14 @@ function resolveAiProvider() {
   if (!requested && OPENAI_API_KEY) return "openai";
 
   return "local";
+}
+
+function resolveTtsProvider() {
+  const requested = String(process.env.TTS_PROVIDER || "").toLowerCase();
+  if (requested === "none" || requested === "off" || requested === "browser") return "browser";
+  if (requested === "fish" && FISH_AUDIO_API_KEY && FISH_AUDIO_REFERENCE_ID) return "fish";
+  if (!requested && FISH_AUDIO_API_KEY && FISH_AUDIO_REFERENCE_ID) return "fish";
+  return "browser";
 }
 
 function describeAiBrain() {

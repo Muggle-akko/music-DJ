@@ -189,6 +189,14 @@ button {
   border-left: 2px solid var(--host);
 }
 
+.host-intro.is-speaking {
+  border-left-color: var(--accent);
+}
+
+.host-intro.is-speaking span::after {
+  content: " AIR";
+}
+
 .host-intro[hidden] {
   display: grid;
   visibility: hidden;
@@ -1092,7 +1100,7 @@ textarea:focus {
 
 .queue-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   margin-top: 14px;
   border: 1px solid var(--border-visible);
@@ -1114,6 +1122,18 @@ textarea:focus {
 .queue-tab-button.is-active {
   background: var(--text-display);
   color: var(--black);
+}
+
+.radio-history-item {
+  grid-template-columns: 34px 44px minmax(0, 1fr) 64px 58px;
+}
+
+.radio-history-cover {
+  border-color: rgba(242, 140, 40, 0.55);
+}
+
+.radio-history-item .mini-action {
+  justify-self: end;
 }
 
 .mini-action-danger {
@@ -1226,7 +1246,7 @@ textarea:focus {
 }
 
 .pager {
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: flex-end;
   gap: 12px;
@@ -1383,7 +1403,8 @@ textarea:focus {
 
   .queue-actions,
   .result-item .mini-action,
-  .playlist-item .mini-action {
+  .playlist-item .mini-action,
+  .radio-history-item .mini-action {
     grid-column: 3;
     justify-self: start;
     margin-top: 6px;

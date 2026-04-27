@@ -1,4 +1,5 @@
 const audio = document.querySelector("#audio");
+const voiceAudio = new Audio();
 const aiInput = document.querySelector("#aiInput");
 const aiComposer = document.querySelector("#aiComposer");
 const searchInput = document.querySelector("#searchInput");
@@ -24,6 +25,7 @@ const songSearchPane = document.querySelector("#songSearchPane");
 const playlistPane = document.querySelector("#playlistPane");
 const queueTab = document.querySelector("#queueTab");
 const likedTab = document.querySelector("#likedTab");
+const historyTab = document.querySelector("#historyTab");
 const queuePrevPage = document.querySelector("#queuePrevPage");
 const queueNextPage = document.querySelector("#queueNextPage");
 
@@ -60,6 +62,7 @@ const moodValue = document.querySelector("#moodValue");
 
 const MAX_QUEUE = 200;
 const MAX_LIKED_TRACKS = 2000;
+const MAX_RADIO_HISTORY = 40;
 const PAGE_SIZE = 10;
 const SEGMENT_COUNT = window.matchMedia("(max-width: 520px)").matches ? 24 : 36;
 const MODE_STORAGE_KEY = "awudio.playMode.v1";
@@ -78,6 +81,12 @@ const PLAY_MODE_LABELS = {
   list: "列表循环",
   shuffle: "随机播放",
 };
+const VOICE_TRIGGER_LEEWAY_MS = 250;
+const VOICE_TRIGGER_LATE_WINDOW_MS = 10000;
+const VOICE_DUCK_RATIO = 0.01;
+const VOICE_PLAYBACK_RATE = 1.2;
+const VOICE_DUCK_FADE_OUT_MS = 750;
+const VOICE_DUCK_FADE_IN_MS = 1400;
 
 const PLAY_SVG = '<path d="M9 6l9 6-9 6V6z"/>';
 const PAUSE_SVG = '<path d="M9 6v12M15 6v12"/>';
@@ -97,12 +106,19 @@ let playMode = localStorage.getItem(MODE_STORAGE_KEY) || "single";
 let volume = normalizeVolume(localStorage.getItem(VOLUME_STORAGE_KEY) ?? 0.7);
 let likedTrackKeys = loadLikedTrackKeys();
 let likedTracks = loadLikedTracks();
+let radioHistory = [];
 let queueView = "queue";
 let aiChatMessages = loadAiChatMessages();
+let voiceGeneration = 0;
+let activeVoiceTask = null;
+let spokenVoiceCueKeys = new Set();
+let duckingRatio = 1;
+let duckAnimationFrame = 0;
 
 init();
 
 async function init() {
+  voiceAudio.preload = "auto";
   renderSegments(0);
   renderAiChat();
   resizeAiInput();
@@ -115,6 +131,7 @@ async function init() {
   await restoreQueue();
   await restoreLikedTracks();
   await loadConfig();
+  await loadRadioHistory({ silent: true });
   await loadNeteaseAccount();
   loadWeatherInfo();
 
@@ -145,6 +162,10 @@ function bindEvents() {
   loadPlaylistsButton.addEventListener("click", loadUserPlaylists);
   queueTab.addEventListener("click", () => setQueueView("queue"));
   likedTab.addEventListener("click", () => setQueueView("liked"));
+  historyTab.addEventListener("click", () => {
+    setQueueView("history");
+    if (!radioHistory.length) void loadRadioHistory();
+  });
   queuePrevPage.addEventListener("click", () => setQueuePage(queuePage - 1));
   queueNextPage.addEventListener("click", () => setQueuePage(queuePage + 1));
   playButton.addEventListener("click", togglePlay);
@@ -183,9 +204,11 @@ function bindEvents() {
     playButton.title = "暂停";
     setPlayIcon(false);
     updateHostIntroDisplay();
+    maybeStartHostIntroVoice();
     void sendTaste("play");
   });
   audio.addEventListener("pause", () => {
+    cancelVoicePipeline({ immediateRestore: true });
     if (currentTrack) setPlayState("[已暂停]", false);
     playButton.setAttribute("aria-label", "播放");
     playButton.title = "播放";
@@ -194,6 +217,7 @@ function bindEvents() {
   });
   audio.addEventListener("ended", handleEnded);
   audio.addEventListener("error", () => {
+    cancelVoicePipeline({ immediateRestore: true });
     setPlayState("[音源错误]", false);
     setTransientPlayState(currentTrack?.blockReason || "[音源错误]");
     hideHostIntro();
@@ -205,6 +229,85 @@ async function loadConfig() {
   brainStatus.textContent =
     data.aiProvider === "local" ? "[大脑: 本地规则]" : `[大脑: ${data.aiModel}]`;
   sourceValue.textContent = data.ncm ? "[来源: 网易云]" : "[来源: 演示]";
+}
+
+async function loadRadioHistory(options = {}) {
+  try {
+    const data = await getJson("/api/radios");
+    radioHistory = normalizeClientRadioHistory(data.radios || []);
+    if (queueView === "history") renderQueue();
+  } catch (error) {
+    if (!options.silent) setTransientPlayState(`[历史电台读取失败: ${error.message}]`);
+  }
+}
+
+function upsertRadioHistoryItem(item) {
+  const normalized = normalizeClientRadioItem(item);
+  if (!normalized) return;
+
+  radioHistory = [
+    normalized,
+    ...radioHistory.filter((radio) => radio.id !== normalized.id),
+  ].slice(0, MAX_RADIO_HISTORY);
+
+  if (queueView === "history") renderQueue();
+}
+
+function normalizeClientRadioHistory(items) {
+  return Array.isArray(items)
+    ? items.map(normalizeClientRadioItem).filter(Boolean).slice(0, MAX_RADIO_HISTORY)
+    : [];
+}
+
+function normalizeClientRadioItem(item) {
+  if (!item || typeof item !== "object") return null;
+
+  const tracks = Array.isArray(item.tracks)
+    ? item.tracks.map(normalizeStoredRadioTrack).filter(isPlayable).slice(0, PLAYLIST_RECOMMENDATION_LIMIT)
+    : [];
+  if (!tracks.length) return null;
+
+  const createdAt = normalizeClientIsoDate(item.createdAt) || new Date().toISOString();
+  const introCount = Number.isFinite(Number(item.introCount))
+    ? Number(item.introCount)
+    : tracks.filter(hasHostIntro).length;
+  const voiceCount = Number.isFinite(Number(item.voiceCount))
+    ? Number(item.voiceCount)
+    : tracks.filter((track) => track.hostIntro?.audioUrl).length;
+
+  return {
+    id: String(item.id || `${createdAt}-${tracks.map(trackKey).join("|")}`).slice(0, 120),
+    title: String(item.title || "历史电台").slice(0, 120),
+    createdAt,
+    updatedAt: normalizeClientIsoDate(item.updatedAt) || createdAt,
+    request: String(item.request || "").slice(0, 360),
+    mood: String(item.mood || "random").slice(0, 32),
+    say: String(item.say || "").slice(0, 160),
+    reason: String(item.reason || "").slice(0, 280),
+    assistantText: String(item.assistantText || "").slice(0, 1200),
+    trackCount: Number(item.trackCount) || tracks.length,
+    introCount,
+    voiceCount,
+    source: item.source && typeof item.source === "object" ? item.source : {},
+    tracks,
+  };
+}
+
+function normalizeStoredRadioTrack(track) {
+  const normalized = normalizeClientTrack(track);
+  if (normalized.hostIntro && !normalized.hostIntro.audioUrl) {
+    normalized.hostIntro.provider = "browser";
+    normalized.hostIntro.fallback = true;
+    normalized.hostIntro.status = normalized.hostIntro.status && normalized.hostIntro.status !== "pending"
+      ? normalized.hostIntro.status
+      : "ready";
+  }
+  return normalized;
+}
+
+function normalizeClientIsoDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 async function loadNeteaseAccount() {
@@ -402,6 +505,9 @@ function applyDjResponse(data, assistantMessageId, options = {}) {
 
   moodValue.textContent = `[心情: ${translateMood(data.plan?.mood || "random")}]`;
   sourceValue.textContent = `[来源: ${translateSource(data.source?.music || "demo")}]`;
+  if (data.radioHistoryItem) {
+    upsertRadioHistoryItem(data.radioHistoryItem);
+  }
   if (options.replaceQueue || mode === "playlist") {
     replaceQueueWithTracks(aiResults);
   }
@@ -536,17 +642,18 @@ function replaceQueueWithTracks(tracks) {
     return;
   }
 
+  cancelVoicePipeline({ immediateRestore: true });
   audio.pause();
   audio.removeAttribute("src");
   audio.load();
+  spokenVoiceCueKeys = new Set();
 
   queue = dedupeTracks(playableTracks).slice(0, MAX_QUEUE);
   currentIndex = resolvePlayableIndex(queue);
   currentTrack = currentIndex >= 0 ? queue[currentIndex] : null;
   queueView = "queue";
   queuePage = 0;
-  queueTab.classList.add("is-active");
-  likedTab.classList.remove("is-active");
+  syncQueueTabs();
   syncQueuePageToCurrent();
   renderCurrentTrack();
   renderQueue();
@@ -581,6 +688,8 @@ async function togglePlay() {
 async function playTrack(index) {
   if (index < 0 || !queue[index] || !isPlayable(queue[index])) return;
 
+  cancelVoicePipeline({ immediateRestore: true });
+  spokenVoiceCueKeys = new Set();
   currentIndex = index;
   currentTrack = queue[index];
   syncQueuePageToCurrent();
@@ -593,6 +702,7 @@ async function playTrack(index) {
 
   try {
     await audio.play();
+    maybeStartHostIntroVoice();
   } catch {
     setPlayState("[点击播放]", false);
   }
@@ -628,6 +738,7 @@ function playNext() {
 }
 
 function handleEnded() {
+  cancelVoicePipeline({ immediateRestore: true });
   if (playMode === "single") return;
   void sendTaste("complete");
   playNext();
@@ -941,11 +1052,16 @@ function formatChatTime(value) {
 }
 
 function setQueueView(view) {
-  queueView = view === "liked" ? "liked" : "queue";
+  queueView = view === "liked" ? "liked" : view === "history" ? "history" : "queue";
   queuePage = 0;
+  syncQueueTabs();
+  renderQueue();
+}
+
+function syncQueueTabs() {
   queueTab.classList.toggle("is-active", queueView === "queue");
   likedTab.classList.toggle("is-active", queueView === "liked");
-  renderQueue();
+  historyTab.classList.toggle("is-active", queueView === "history");
 }
 
 function toggleQueueMenu(item) {
@@ -970,12 +1086,14 @@ function removeQueueItem(index) {
   queue.splice(index, 1);
 
   if (!queue.length) {
+    cancelVoicePipeline({ immediateRestore: true });
     currentIndex = -1;
     currentTrack = null;
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
   } else if (removingCurrent) {
+    cancelVoicePipeline({ immediateRestore: true });
     currentIndex = Math.min(index, queue.length - 1);
     currentTrack = queue[currentIndex];
     audio.pause();
@@ -1020,20 +1138,24 @@ function updateHostIntroDisplay() {
   const startAtMs = Number(intro.startAtMs) || 0;
   const durationMs = Number(intro.estimatedDurationMs) || estimateClientHostIntroDurationMs(intro.displayText);
   const endAtMs = startAtMs + durationMs;
+  const cueKey = getVoiceCueKey(currentTrack, intro);
+  const voiceIsActive = Boolean(activeVoiceTask && activeVoiceTask.cueKey === cueKey);
 
-  if (currentMs < startAtMs || currentMs > endAtMs) {
+  if (!voiceIsActive && (currentMs < startAtMs || currentMs > endAtMs)) {
     hideHostIntro();
     return;
   }
 
   hostIntroTime.textContent = formatTime(startAtMs / 1000);
   hostIntroText.textContent = intro.displayText;
+  hostIntro.classList.toggle("is-speaking", voiceIsActive);
   hostIntro.hidden = false;
 }
 
 function hideHostIntro() {
   if (!hostIntro || !hostIntroText) return;
   hostIntro.hidden = true;
+  hostIntro.classList.remove("is-speaking");
   hostIntroText.textContent = "";
 }
 
@@ -1045,6 +1167,322 @@ function hasHostIntro(track) {
   return Boolean(track?.hostIntro?.enabled && track.hostIntro.displayText);
 }
 
+function maybeStartHostIntroVoice() {
+  if (!currentTrack || !audio.currentSrc || audio.paused || audio.ended || activeVoiceTask) return;
+
+  const intro = getHostIntro(currentTrack);
+  if (!intro) return;
+
+  const currentMs = Number.isFinite(audio.currentTime) ? audio.currentTime * 1000 : 0;
+  const startAtMs = Number(intro.startAtMs) || 0;
+  if (currentMs + VOICE_TRIGGER_LEEWAY_MS < startAtMs) return;
+  if (currentMs > startAtMs + VOICE_TRIGGER_LATE_WINDOW_MS) return;
+
+  const cueKey = getVoiceCueKey(currentTrack, intro);
+  if (spokenVoiceCueKeys.has(cueKey)) return;
+
+  spokenVoiceCueKeys.add(cueKey);
+  const token = ++voiceGeneration;
+  void startHostIntroVoice(currentTrack, intro, cueKey, token);
+}
+
+async function startHostIntroVoice(track, intro, cueKey, token) {
+  activeVoiceTask = { token, cueKey, state: "preparing" };
+  updateHostIntroDisplay();
+
+  const ducking = normalizeClientVoiceDucking(intro.ducking);
+
+  try {
+    const cue = await resolveHostIntroVoiceCue(track, intro, ducking);
+    if (!isCurrentVoiceToken(token)) return;
+
+    const cueDucking = normalizeClientVoiceDucking(cue.ducking || ducking);
+    activeVoiceTask = { token, cueKey, state: "ducking" };
+    updateHostIntroDisplay();
+    await animateMusicDucking(cueDucking.targetRatio, cueDucking.fadeOutMs, token);
+    if (!isCurrentVoiceToken(token)) return;
+
+    activeVoiceTask = { token, cueKey, state: "speaking" };
+    setPlayState("[主播讲解]", true);
+    updateHostIntroDisplay();
+
+    if (cue.audioUrl) {
+      try {
+        await playVoiceAudio(cue.audioUrl, token);
+      } catch {
+        await speakWithBrowserVoice(intro.displayText, token);
+      }
+    } else {
+      await speakWithBrowserVoice(intro.displayText, token);
+    }
+  } catch {
+    // Voice is optional; a failed cue should never interrupt music playback.
+  } finally {
+    if (isCurrentVoiceToken(token)) {
+      activeVoiceTask = { token, cueKey, state: "restoring" };
+      updateHostIntroDisplay();
+      await animateMusicDucking(1, ducking.fadeInMs, token);
+      if (isCurrentVoiceToken(token)) {
+        activeVoiceTask = null;
+        refreshPlayStateForCurrent();
+        updateHostIntroDisplay();
+      }
+    }
+  }
+}
+
+async function resolveHostIntroVoiceCue(track, intro, ducking) {
+  const savedStatus = String(intro.status || "").toLowerCase();
+
+  if (intro.audioUrl) {
+    return {
+      audioUrl: intro.audioUrl,
+      provider: intro.provider || "cached",
+      status: intro.status || "ready",
+      voiceCueId: intro.voiceCueId || "",
+      speed: intro.speed || 0,
+      ducking,
+    };
+  }
+
+  if (
+    intro.provider === "browser" ||
+    intro.fallback ||
+    ["ready", "failed", "fallback", "unavailable", "skipped"].includes(savedStatus)
+  ) {
+    return {
+      audioUrl: "",
+      provider: "browser",
+      status: savedStatus || "fallback",
+      voiceCueId: intro.voiceCueId || "",
+      speed: intro.speed || VOICE_PLAYBACK_RATE,
+      fallback: true,
+      ducking,
+    };
+  }
+
+  const cue = await postJson("/api/tts", {
+    text: intro.displayText,
+    trackId: track.id,
+    title: track.title,
+    artist: track.artist,
+    tone: intro.tone,
+    moodIntent: intro.moodIntent,
+    estimatedDurationMs: intro.estimatedDurationMs,
+  });
+
+  persistVoiceCueToCurrentTrack(track, intro, cue);
+  return cue;
+}
+
+function persistVoiceCueToCurrentTrack(track, intro, cue) {
+  if (!cue || typeof cue !== "object") return;
+
+  const mergedIntro = normalizeClientHostIntro({
+    ...intro,
+    voiceCueId: cue.voiceCueId || intro.voiceCueId,
+    audioUrl: cue.audioUrl || intro.audioUrl,
+    status: cue.status || (cue.audioUrl ? "ready" : intro.status),
+    provider: cue.provider || intro.provider,
+    fallback: Boolean(cue.fallback ?? intro.fallback),
+    cacheHit: Boolean(cue.cacheHit ?? intro.cacheHit),
+    model: cue.model || intro.model,
+    voiceId: cue.voiceId || intro.voiceId,
+    speed: cue.speed || intro.speed,
+    ducking: cue.ducking || intro.ducking,
+  });
+  if (!mergedIntro) return;
+
+  Object.assign(intro, mergedIntro);
+
+  const key = trackKey(track);
+  let changed = false;
+  for (const item of queue) {
+    if (trackKey(item) !== key) continue;
+    item.hostIntro = normalizeClientHostIntro({
+      ...(item.hostIntro || {}),
+      ...mergedIntro,
+    });
+    changed = true;
+  }
+
+  if (currentTrack && trackKey(currentTrack) === key) {
+    currentTrack.hostIntro = mergedIntro;
+    changed = true;
+  }
+
+  if (changed) persistQueue();
+}
+
+async function playVoiceAudio(src, token) {
+  stopVoiceAudio();
+  voiceAudio.src = src;
+  voiceAudio.playbackRate = VOICE_PLAYBACK_RATE;
+  voiceAudio.currentTime = 0;
+  await voiceAudio.play();
+  await waitForVoiceAudio(token);
+}
+
+function waitForVoiceAudio(token) {
+  return new Promise((resolve, reject) => {
+    let timer = 0;
+    const cleanup = () => {
+      window.clearInterval(timer);
+      voiceAudio.removeEventListener("ended", handleEnded);
+      voiceAudio.removeEventListener("error", handleError);
+    };
+    const finish = () => {
+      cleanup();
+      resolve();
+    };
+    const handleEnded = () => finish();
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Voice audio failed"));
+    };
+
+    timer = window.setInterval(() => {
+      if (!isCurrentVoiceToken(token)) finish();
+    }, 120);
+    voiceAudio.addEventListener("ended", handleEnded, { once: true });
+    voiceAudio.addEventListener("error", handleError, { once: true });
+  });
+}
+
+function speakWithBrowserVoice(text, token) {
+  if (!("speechSynthesis" in window) || !window.SpeechSynthesisUtterance) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let timer = 0;
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = window.speechSynthesis.getVoices();
+    const chineseVoice = voices.find((voice) => /zh|Chinese|中文|普通话|Mandarin/i.test(`${voice.lang} ${voice.name}`));
+
+    if (chineseVoice) utterance.voice = chineseVoice;
+    utterance.lang = chineseVoice?.lang || "zh-CN";
+    utterance.rate = 1.2;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const finish = () => {
+      window.clearInterval(timer);
+      utterance.onend = null;
+      utterance.onerror = null;
+      resolve();
+    };
+
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    timer = window.setInterval(() => {
+      if (!isCurrentVoiceToken(token)) finish();
+    }, 120);
+
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+function cancelVoicePipeline(options = {}) {
+  const shouldRestore = options.restore !== false;
+  voiceGeneration += 1;
+  activeVoiceTask = null;
+  stopVoiceAudio();
+
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+
+  if (options.immediateRestore) {
+    window.cancelAnimationFrame(duckAnimationFrame);
+    setDuckingRatio(1);
+  } else if (shouldRestore) {
+    void animateMusicDucking(1, VOICE_DUCK_FADE_IN_MS);
+  }
+
+  updateHostIntroDisplay();
+  refreshPlayStateForCurrent();
+}
+
+function stopVoiceAudio() {
+  voiceAudio.pause();
+  voiceAudio.removeAttribute("src");
+  voiceAudio.load();
+}
+
+function isCurrentVoiceToken(token) {
+  return Boolean(activeVoiceTask && activeVoiceTask.token === token);
+}
+
+function getVoiceCueKey(track, intro) {
+  return [
+    trackKey(track),
+    intro.voiceCueId || "",
+    Number(intro.startAtMs) || 0,
+    intro.displayText,
+  ].join("::");
+}
+
+function normalizeClientVoiceDucking(value = {}) {
+  const targetRatio = Number(value.targetRatio);
+  const cappedTargetRatio = Number.isFinite(targetRatio)
+    ? Math.min(targetRatio, VOICE_DUCK_RATIO)
+    : VOICE_DUCK_RATIO;
+
+  return {
+    targetRatio: clampRatio(cappedTargetRatio, VOICE_DUCK_RATIO, 0.08, 0.9),
+    fadeOutMs: clampMilliseconds(value.fadeOutMs, VOICE_DUCK_FADE_OUT_MS, 0, 5000),
+    fadeInMs: clampMilliseconds(value.fadeInMs, VOICE_DUCK_FADE_IN_MS, 0, 8000),
+  };
+}
+
+function animateMusicDucking(targetRatio, durationMs = 0, token = 0) {
+  const target = clampRatio(targetRatio, 1, 0, 1);
+  const duration = Math.max(0, Number(durationMs) || 0);
+  const start = duckingRatio;
+  const startedAt = performance.now();
+
+  window.cancelAnimationFrame(duckAnimationFrame);
+
+  return new Promise((resolve) => {
+    const step = (now) => {
+      if (token && !isCurrentVoiceToken(token)) {
+        resolve();
+        return;
+      }
+
+      const ratio = duration ? Math.min(1, (now - startedAt) / duration) : 1;
+      setDuckingRatio(start + (target - start) * easeInOut(ratio));
+
+      if (ratio >= 1) {
+        resolve();
+        return;
+      }
+
+      duckAnimationFrame = window.requestAnimationFrame(step);
+    };
+
+    duckAnimationFrame = window.requestAnimationFrame(step);
+  });
+}
+
+function setDuckingRatio(value) {
+  duckingRatio = clampRatio(value, 1, 0, 1);
+  applyMusicVolume();
+}
+
+function easeInOut(value) {
+  const ratio = Math.max(0, Math.min(1, value));
+  return ratio < 0.5 ? 2 * ratio * ratio : 1 - Math.pow(-2 * ratio + 2, 2) / 2;
+}
+
+function clampRatio(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
+}
+
 function renderTrackTitle(track, fallback = "未命名") {
   const title = escapeHtml(track?.title || fallback);
   const dot = hasHostIntro(track)
@@ -1054,19 +1492,21 @@ function renderTrackTitle(track, fallback = "未命名") {
 }
 
 function renderQueue() {
+  if (queueView === "history") {
+    renderRadioHistory();
+    return;
+  }
+
   const sourceTracks = queueView === "liked" ? likedTracks : queue;
-  const pageCount = getQueuePageCount();
-  queuePage = Math.min(queuePage, pageCount - 1);
-  const start = queuePage * PAGE_SIZE;
-  const visibleTracks = sourceTracks.slice(start, start + PAGE_SIZE);
+  const visibleTracks = sourceTracks;
 
   queueCount.textContent =
     queueView === "liked"
       ? `${String(likedTracks.length).padStart(2, "0")} 首喜欢`
       : `${String(queue.length).padStart(2, "0")} / ${MAX_QUEUE}`;
-  queuePageInfo.textContent = `第 ${queuePage + 1} / ${pageCount} 页`;
-  queuePrevPage.disabled = queuePage <= 0;
-  queueNextPage.disabled = queuePage >= pageCount - 1;
+  queuePageInfo.textContent = "";
+  queuePrevPage.disabled = true;
+  queueNextPage.disabled = true;
   queueList.innerHTML = "";
 
   if (!sourceTracks.length) {
@@ -1079,7 +1519,7 @@ function renderQueue() {
   }
 
   visibleTracks.forEach((track, localIndex) => {
-    const index = start + localIndex;
+    const index = localIndex;
     const isCurrent = queueView === "queue" && index === currentIndex;
     const isLiked = isLikedTrack(track);
     const item = document.createElement("li");
@@ -1130,6 +1570,86 @@ function renderQueue() {
     });
     queueList.append(item);
   });
+}
+
+function renderRadioHistory() {
+  const visibleRadios = radioHistory;
+
+  queueCount.textContent = `${String(radioHistory.length).padStart(2, "0")} 个电台`;
+  queuePageInfo.textContent = "";
+  queuePrevPage.disabled = true;
+  queueNextPage.disabled = true;
+  queueList.innerHTML = "";
+
+  if (!radioHistory.length) {
+    const empty = document.createElement("li");
+    empty.className = "queue-item radio-history-item is-empty";
+    empty.innerHTML =
+      '<span class="queue-index">--</span><div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div><div class="queue-title"><strong>暂无历史电台</strong><span>生成推荐歌单后会保存到这里</span></div><span class="queue-duration">--</span><button class="mini-action" type="button" disabled>填充</button>';
+    queueList.append(empty);
+    return;
+  }
+
+  visibleRadios.forEach((radio, localIndex) => {
+    const index = localIndex;
+    const item = document.createElement("li");
+    item.className = "queue-item radio-history-item";
+    const details = [
+      formatRadioCreatedAt(radio.createdAt),
+      `${radio.trackCount || radio.tracks.length} 首`,
+      `${radio.introCount || 0} 段讲解`,
+      `${radio.voiceCount || 0} 段语音`,
+    ].join(" / ");
+
+    item.innerHTML = `
+      <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
+      <div class="queue-cover queue-cover-placeholder radio-history-cover" aria-hidden="true"></div>
+      <div class="queue-title">
+        <strong>${escapeHtml(radio.title || "历史电台")}</strong>
+        <span>${escapeHtml(details)}</span>
+      </div>
+      <span class="queue-duration">${escapeHtml(translateMood(radio.mood || "random"))}</span>
+      <button class="mini-action" type="button">填充</button>
+    `;
+
+    item.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      loadRadioHistoryItem(radio);
+    });
+    item.addEventListener("dblclick", () => loadRadioHistoryItem(radio));
+    item.querySelector("button").addEventListener("click", (event) => {
+      event.stopPropagation();
+      loadRadioHistoryItem(radio);
+    });
+    queueList.append(item);
+  });
+}
+
+function loadRadioHistoryItem(radio) {
+  const tracks = Array.isArray(radio?.tracks)
+    ? radio.tracks.map(normalizeStoredRadioTrack).filter(isPlayable)
+    : [];
+
+  if (!tracks.length) {
+    setTransientPlayState("[历史电台为空]");
+    return;
+  }
+
+  replaceQueueWithTracks(tracks);
+  moodValue.textContent = `[心情: ${translateMood(radio.mood || "random")}]`;
+  sourceValue.textContent = "[来源: 历史电台]";
+  setTransientPlayState(`[历史电台: ${tracks.length} 首]`);
+}
+
+function formatRadioCreatedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未知";
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${month}.${day} ${hours}:${minutes}`;
 }
 
 function renderResults(listElement, countElement, tracks, unit = "条结果") {
@@ -1204,6 +1724,7 @@ function updateProgress() {
   progressSegments.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
   renderSegments(ratio);
   updateHostIntroDisplay();
+  maybeStartHostIntroVoice();
 }
 
 function beginProgressSeek(event) {
@@ -1217,6 +1738,7 @@ function beginProgressSeek(event) {
 }
 
 function seekFromPointer(event) {
+  cancelVoicePipeline({ immediateRestore: true });
   const rect = progressSegments.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
   audio.currentTime = ratio * audio.duration;
@@ -1233,11 +1755,13 @@ function handleProgressKeydown(event) {
   const step = event.shiftKey ? 15 : 5;
 
   if (event.key === "ArrowLeft") {
+    cancelVoicePipeline({ immediateRestore: true });
     audio.currentTime = Math.max(0, audio.currentTime - step);
     event.preventDefault();
   }
 
   if (event.key === "ArrowRight") {
+    cancelVoicePipeline({ immediateRestore: true });
     audio.currentTime = Math.min(audio.duration, audio.currentTime + step);
     event.preventDefault();
   }
@@ -1277,19 +1801,16 @@ function activateNeteaseSubTab(tab) {
 }
 
 function setQueuePage(page) {
-  const pageCount = getQueuePageCount();
-  queuePage = Math.max(0, Math.min(page, pageCount - 1));
+  queuePage = 0;
   renderQueue();
 }
 
 function getQueuePageCount() {
-  const length = queueView === "liked" ? likedTracks.length : queue.length;
-  return Math.max(1, Math.ceil(length / PAGE_SIZE));
+  return 1;
 }
 
 function syncQueuePageToCurrent() {
-  if (currentIndex < 0) return;
-  queuePage = Math.floor(currentIndex / PAGE_SIZE);
+  queuePage = 0;
 }
 
 function setBusy(isBusy, state = null) {
@@ -1316,7 +1837,7 @@ function setPlayMode(mode) {
 
 function setVolume(value, options = {}) {
   volume = normalizeVolume(value);
-  audio.volume = volume;
+  applyMusicVolume();
   audio.muted = volume === 0;
   volumeValue.textContent = `${Math.round(volume * 100)}%`;
 
@@ -1330,6 +1851,11 @@ function setVolume(value, options = {}) {
   if (options.save !== false) {
     localStorage.setItem(VOLUME_STORAGE_KEY, String(volume));
   }
+}
+
+function applyMusicVolume() {
+  audio.volume = normalizeVolume(volume * duckingRatio);
+  audio.muted = volume === 0;
 }
 
 function setPlayState(text, isPlaying) {
@@ -1476,19 +2002,29 @@ function normalizeClientTrack(track) {
 function normalizeClientHostIntro(value) {
   if (!value || typeof value !== "object") return null;
 
-  const displayText = String(value.displayText || value.text || "").trim().slice(0, 420);
+  const displayText = String(value.displayText || value.text || "").trim().slice(0, 1200);
   if (!displayText) return null;
 
   return {
     enabled: value.enabled !== false,
+    voiceCueId: String(value.voiceCueId || "").slice(0, 90),
     startAtMs: clampMilliseconds(value.startAtMs, 0, 0, 60000),
     estimatedDurationMs: clampMilliseconds(
       value.estimatedDurationMs,
       estimateClientHostIntroDurationMs(displayText),
       12000,
-      90000,
+      180000,
     ),
     displayText,
+    audioUrl: String(value.audioUrl || "").slice(0, 500),
+    status: String(value.status || "pending").slice(0, 32),
+    provider: String(value.provider || "").slice(0, 32),
+    fallback: Boolean(value.fallback),
+    cacheHit: Boolean(value.cacheHit),
+    model: String(value.model || "").slice(0, 80),
+    voiceId: String(value.voiceId || "").slice(0, 120),
+    speed: clampRatio(value.speed, 0, 0, 1.5),
+    ducking: normalizeClientVoiceDucking(value.ducking),
     tone: String(value.tone || "context").slice(0, 32),
     moodIntent: String(value.moodIntent || "random").slice(0, 32),
     source: String(value.source || "").slice(0, 40),
@@ -1497,7 +2033,7 @@ function normalizeClientHostIntro(value) {
 
 function estimateClientHostIntroDurationMs(text) {
   const charCount = String(text || "").replace(/\s+/g, "").length;
-  return Math.max(12000, Math.min(90000, Math.round((charCount / 4.2) * 1000)));
+  return Math.max(12000, Math.min(180000, Math.round((charCount / 4.2) * 1000)));
 }
 
 function clampMilliseconds(value, fallback, min, max) {

@@ -95,3 +95,23 @@ POST /api/taste - 记录喜欢、不喜欢和播放历史。
 GET /api/now - 当前播放状态。
 GET /api/plan/today - 占位用的每日电台计划。
 
+声音管线 / Fish Audio
+如果歌曲对象带有 hostIntro，前端会在对应时间点以 1.2 倍速读出讲解词，并把音乐音量渐低到约 16%，讲完后渐回。没有配置 Fish Audio 时，会使用浏览器内置 SpeechSynthesis 兜底。
+
+Fish Audio 配置：
+env
+
+编辑
+
+
+
+TTS_PROVIDER=fish
+FISH_AUDIO_API_KEY=你的 Fish Audio API key
+FISH_AUDIO_REFERENCE_ID=你的声音模型 reference_id
+FISH_AUDIO_MODEL=s2-pro
+FISH_AUDIO_LATENCY=normal
+FISH_AUDIO_SPEED=1
+
+API
+POST /api/tts - 合成或读取缓存后的主播讲解音频。
+GET /api/tts/audio/:file - 读取缓存的讲解音频。
