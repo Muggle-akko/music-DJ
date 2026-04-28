@@ -1,5 +1,23 @@
-const CACHE_NAME = "awudio-mvp-v14";
-const STATIC_ASSETS = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest"];
+const CACHE_NAME = "awudio-mvp-v18";
+const STATIC_ASSETS = [
+  "/",
+  "/index.html",
+  "/styles.css",
+  "/app.js",
+  "/manifest.webmanifest",
+  "/fonts/google-fonts.css",
+  "/fonts/font-01.woff2",
+  "/fonts/font-02.woff2",
+  "/fonts/font-03.woff2",
+  "/fonts/font-04.woff2",
+  "/fonts/font-05.woff2",
+  "/fonts/font-06.woff2",
+  "/fonts/font-07.woff2",
+  "/fonts/font-08.woff2",
+  "/fonts/font-09.woff2",
+  "/fonts/font-10.woff2",
+  "/fonts/font-11.woff2",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)));

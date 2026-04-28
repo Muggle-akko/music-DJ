@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { copyFile, readFile, rename, writeFile, mkdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -12,8 +12,10 @@ const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = resolve(ROOT, "public");
 const DATA_DIR = resolve(ROOT, "data");
 const STATE_FILE = resolve(DATA_DIR, "state.json");
+const STATE_BACKUP_FILE = resolve(DATA_DIR, "state.backup.json");
 const LISTENING_PROFILE_FILE = resolve(DATA_DIR, "listening-profile.json");
 const TTS_CACHE_DIR = resolve(DATA_DIR, "tts");
+let stateWriteQueue = Promise.resolve();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
@@ -36,9 +38,12 @@ const NCM_DAILY_RECOMMEND_LIMIT = 30;
 const MAX_RECOMMENDATION_DURATION_MS = 12 * 60 * 1000;
 const MAX_QUEUE = 200;
 const MAX_RADIO_HISTORY = 40;
-const PROFILE_RECOMMENDATION_LIKED_RATIO = 0.82;
-const PROFILE_RECOMMENDATION_CANDIDATE_LIMIT = 120;
-const CHAT_RECOMMENDATION_LIMIT = 3;
+const PROFILE_RECOMMENDATION_LIKED_RATIO = 0.72;
+const PROFILE_RECOMMENDATION_CANDIDATE_LIMIT = 1500;
+const RADIO_HISTORY_REPEAT_PENALTY_LIMIT = 8;
+const NCM_PLAYLIST_SEARCH_LIMIT = 8;
+const NCM_PLAYLIST_TRACK_PROBE_LIMIT = 24;
+const CHAT_RECOMMENDATION_LIMIT = 5;
 const PLAYLIST_RECOMMENDATION_LIMIT = 30;
 const HOST_INTRO_COVERAGE_RATIO = 0.6;
 const HOST_INTRO_MAX_COUNT = PLAYLIST_RECOMMENDATION_LIMIT;
@@ -117,6 +122,8 @@ const CONTENT_TYPES = {
   ".mp3": "audio/mpeg",
   ".wav": "audio/wav",
   ".opus": "audio/ogg",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
   ".webmanifest": "application/manifest+json; charset=utf-8",
 };
 
@@ -188,17 +195,18 @@ const DJ_INSTRUCTIONS = [
   "Schema:",
   '{"intent":"recommend|playlist|music_chat|library_query","say":"Chinese DJ line under 36 chars","reason":"Chinese reason under 90 chars","mood":"focus|chill|energy|sleep|random","search":"best fallback NetEase search keyword","seedQueries":[{"query":"NetEase search keyword","intent":"why this query fits","weight":1}],"queue":["keyword 1","keyword 2"],"avoid":["artist or song to avoid"],"voice":false}',
   "Voice: warm, bright, concise, and lightly hosted like a radio DJ. Do not be overly cute or verbose.",
+  "Persona rule: the long-term listening profile is Faye's own DJ taste, distilled from the listener's library. Public copy should say my taste, my library, or my radio instinct; do not frame recommendations as the user's taste or the user's preferences.",
   "Never start with repetitive acknowledgements such as '收到', '好的', '明白', or '我会'.",
   "Do not prefix chat text with 'Faye'. Let the UI carry the speaker identity.",
   "First classify the user intent. Only use recommend/playlist when the user explicitly asks to play, recommend, generate, add, or replace songs.",
   "If the user asks why, how, logic, reason, basis, or asks about the previous recommendation, use music_chat and answer the question. Do not recommend or return songs.",
   "Use music_chat when the user wants to discuss a song, artist, album, style, lyric feeling, or listening impression. Do not turn that into a recommendation.",
-  "Use library_query when the user asks about their liked library or playlists, such as recent additions, new releases, top artists, or which songs match a condition. Do not turn that into a recommendation.",
-  "For recommend/playlist, analyze current mood/time, liked songs, liked library, recent plays, queue, disliked songs, and distilled listening profile.",
+  "Use library_query when the listener asks about the liked library or playlists behind Faye's DJ taste, such as recent additions, new releases, top artists, or which songs match a condition. Do not turn that into a recommendation.",
+  "For recommend/playlist, analyze current mood/time, liked songs, liked library, recent plays, queue, disliked songs, and Faye's distilled listening profile.",
   "For recommend/playlist, generate 6 to 10 practical NetEase Music search queries. Prefer exact song/artist pairs when known, otherwise artist + style, playlist-friendly Chinese keywords, or mood/genre terms.",
   "Use liked artists/songs as taste anchors, but do not expose internal filtering details or name songs you avoided.",
   "Respect disliked artists/songs and avoid blocked or overplayed tracks.",
-  "When the user asks for a playlist, explain the taste direction briefly; do not list many song titles in the chat text because the UI shows the playlist separately.",
+  "When the listener asks for a playlist, explain Faye's taste direction briefly; do not list many song titles in the chat text because the UI shows the playlist separately.",
   "Avoid boilerplate such as 'start with these songs' unless the user explicitly asked what to play first.",
   "Prefer natural Chinese phrasing. Keep the visible reply to 1 to 3 short Chinese lines.",
   "Do not invent inaccessible private data. Keep queries short enough to work well in NetEase search.",
@@ -208,16 +216,19 @@ const ROUTER_INSTRUCTIONS = [
   "You are Faye's intent router for a personal music player.",
   "Return only valid JSON. No markdown, no comments.",
   "Schema:",
-  '{"intent":"recommend|playlist|music_chat|library_query|control","confidence":0.0,"shouldSearchMusic":false,"shouldReplaceQueue":false,"shouldShowTrackCards":false,"replyMode":"chat_only|recommend_with_cards|replace_queue","mood":"focus|chill|energy|sleep|random","scene":"coding|sleep|commute|workout|chat|unknown","queryHints":["short NetEase search query"],"answer":"Chinese answer for chat_only, 1-3 short lines","reason":"short routing reason"}',
+  '{"intent":"recommend|playlist|music_chat|library_query|control","confidence":0.0,"shouldSearchMusic":false,"shouldReplaceQueue":false,"shouldShowTrackCards":false,"replyMode":"chat_only|recommend_with_cards|replace_queue","mood":"focus|chill|energy|sleep|random","scene":"coding|sleep|commute|workout|chat|unknown","recommendationCount":3,"queryHints":["short NetEase search query"],"answer":"Chinese answer, 1-3 short lines","reason":"Chinese public-facing reason"}',
   "Use recommend only when the user explicitly asks to play, recommend, find songs, add songs, or wants music candidates.",
   "Use playlist when the user asks to generate, replace, or arrange a playlist.",
-  "Use music_chat when the user asks about taste, style, genre proportion, song feeling, lyrics, why/how/reasoning, or wants discussion without requesting songs.",
-  "Use library_query when the user asks what is in their liked library or playlists.",
+  "Use music_chat when the listener asks about Faye's taste, style, genre proportion, song feeling, lyrics, why/how/reasoning, or wants discussion without requesting songs.",
+  "If the user asks for another songs by a singer, similar songs, or alternatives around an artist, that is recommend, not music_chat.",
+  "Use library_query when the listener asks what is in the liked library or playlists behind Faye's taste.",
   "Use control for playback commands such as pause, next, previous, clear queue, or volume.",
   "For music_chat/library_query/control set shouldSearchMusic false, shouldShowTrackCards false, and replyMode chat_only.",
   "For recommend set shouldSearchMusic true, shouldShowTrackCards true, and replyMode recommend_with_cards.",
   "For playlist set shouldSearchMusic true, shouldReplaceQueue true, and replyMode replace_queue.",
-  "Keep answer natural Chinese. Do not append song-count text.",
+  "For recommend, choose recommendationCount from 2 to 5 based on how many songs feel useful. Do not always choose 5.",
+  "Persona rule for public answer/reason: if taste or preference is mentioned, attribute it to Faye's DJ taste instead of the user's taste.",
+  "Keep answer and reason natural Chinese. Never expose internal route labels, English routing reasons, or implementation words such as route, intent, explicit, button, fallback.",
 ].join("\n");
 
 const HOST_INTRO_INSTRUCTIONS = [
@@ -226,18 +237,30 @@ const HOST_INTRO_INSTRUCTIONS = [
   "Schema:",
   '{"items":[{"trackId":"exact track id from input","index":0,"startAtMs":0,"displayText":"Chinese radio host intro, 180-520 chars","tone":"comfort|context|energy|night|focus","reason":"short reason for choosing this song"}]}',
   "Generate host intros for at least targetCount tracks. More is acceptable when the playlist flow benefits from it.",
+  "Do not simply choose the first targetCount tracks. Spread intros across the beginning, middle, and end of the playlist; use introCoverageSlots as a guide for coverage, then choose the best nearby songs.",
+  "Always include the final playable track when finalPlayableIndex is present. It is the closing song and should get a farewell intro.",
+  "For tracks at or after farewellStartIndex, treat the copy as the final section of the radio set: gradually close the emotional arc instead of opening new topics.",
+  "For the final playable track, explicitly say goodbye to the listener in a natural Chinese radio-host way. Tie the goodbye to currentIsoTime, clientContext.date, weather, time slot, night/morning/afternoon mood, or the user's original request when available.",
+  "The final goodbye should not sound like a hard stop or a customer-service signoff. Make it feel like Faye is lowering the studio lights, leaving one last thought, and letting the listener continue their day or night.",
+  "Persona rule: the listening profile belongs to Faye's DJ persona. In public copy, say 我的口味, 我的歌库, 我会偏爱, 我选它, or 这套电台的审美; do not say 你的口味, 你的偏好, 你的收藏, or 你的曲库.",
   "Prefer songs that feel like good radio entry points, mood turns, familiar anchors, emotional pauses, or songs whose artist/title/album/tags give you something concrete to say.",
-  "Use the user's current request, mood, time, weather, song title, artist, album, tags, and any known music facts already present in the input.",
+  "Use the listener's current request, mood, time, weather, song title, artist, album, tags, currentIsoTime, and any known music facts already present in the input.",
   "If you know a widely established fact about the artist, song, album, era, style, or background, you may mention it. If you are not sure, say it as listening context or feeling instead of inventing facts.",
+  "Within the same playlist, make every intro visibly different. Before writing, assign each selected track a distinct angle such as: sonic detail, playlist transition, artist/background context, personal memory, philosophical reflection, classic film or literature association, recent public news/current cultural mood, work-life observation, city/night/weather scene, or listening technique.",
+  "Do not reuse the same angle more than twice in one playlist. Avoid repeating the same opening, sentence rhythm, metaphor, emotional adjective, or advice pattern across items.",
+  "For philosophical or cultural analysis, keep it conversational and tied to the song; do not become abstract filler.",
+  "For classic film/literature references, use only broadly recognizable works when the association feels natural. Do not force a reference into every intro.",
+  "For recent news or current events, mention only events you are confident are real or that are present in the input. If uncertain, discuss the broader current mood instead of inventing specific news details, names, dates, or numbers.",
   "The intro will appear near the beginning of the song, so startAtMs should usually be 0.",
   "Make the Chinese copy feel like a real radio host speaking to one listener: natural, paced, a little informative, emotionally aware, and not like an encyclopedia card.",
   "The intro can be longer than a subtitle. It should sound speakable in 25-90 seconds when the song deserves context.",
   "Blend three layers when possible: why this song is here, one bit of artist/song/style/background context, and what the listener can notice or feel when the music begins.",
   "If the user's request implies tiredness, stress, loneliness, or low mood, make several intros quietly comforting without becoming generic motivational copy.",
-  "Avoid repeated openings such as '接下来这首'. Avoid naming sources or saying you searched.",
+  "Avoid repeated openings such as '接下来这首', '现在让', '这首歌', '歌单走到这里', or '如果你今天'. Avoid naming sources or saying you searched.",
   "Good style sample 1: 这一段我们先不急着把情绪推高。《Song》放在这里，是因为它的鼓点和声线都有一点往前走的力量，但不会催你。Artist 的音乐常常把明亮和克制放在一起，适合在有点累的时候，把注意力慢慢从杂音里带回来。",
   "Good style sample 2: 现在让声音稍微靠近一点。《Song》这类作品最动人的地方，不一定是副歌有多大，而是它把一个很私人的瞬间唱得很开阔。如果你今天心里有些堵，就先别急着解释，跟着前奏把呼吸放长一点。",
   "Good style sample 3: 歌单走到这里，需要一个转场。《Song》有很清楚的年代感和画面感，像夜里路灯一盏盏往后退。你可以留意它的贝斯和节拍，音乐会先稳住脚步，再慢慢把情绪带亮。",
+  "Good final-song sample: 最后一首我想把声音留得轻一点。《Song》不是用来把今晚推向高潮的，更像把灯慢慢调暗。现在已经接近夜里，城市的噪声会慢下来一些，我也在这里和你说声晚安。把这首听完，后面的路就交给你自己慢慢走。",
 ].join("\n");
 
 await mkdir(DATA_DIR, { recursive: true });
@@ -266,7 +289,7 @@ server.listen(PORT, () => {
   console.log(`Awudio MVP running at http://localhost:${PORT}`);
   console.log(`AI brain: ${describeAiBrain()}`);
   console.log(`Netease adapter: ${NCM_API_BASE || "demo mode"}`);
-  console.log(`Voice pipeline: ${TTS_PROVIDER}${TTS_PROVIDER === "fish" ? `:${FISH_AUDIO_MODEL}` : " fallback"}`);
+  console.log(`Voice pipeline: ${TTS_PROVIDER}${TTS_PROVIDER === "fish" ? `:${FISH_AUDIO_MODEL}` : ""}`);
 });
 
 async function routeApi(req, res, url) {
@@ -286,7 +309,7 @@ async function routeApi(req, res, url) {
         fishAudio: Boolean(FISH_AUDIO_API_KEY),
         fishAudioVoice: Boolean(FISH_AUDIO_REFERENCE_ID),
         model: TTS_PROVIDER === "fish" ? FISH_AUDIO_MODEL : null,
-        browserFallback: true,
+        browserFallback: false,
       },
       mode: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
       serverBuild: "awudio-server-v12",
@@ -370,6 +393,14 @@ async function routeApi(req, res, url) {
       playableCount: tracks.filter((track) => track.playable).length,
       blockedCount: tracks.filter((track) => !track.playable).length,
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/music/playlist-search") {
+    const query = url.searchParams.get("q") || "私人雷达";
+    const limit = clampNumber(url.searchParams.get("limit"), NCM_PLAYLIST_SEARCH_LIMIT, 1, 20);
+    const playlists = await searchNcmPlaylists(query, limit);
+    sendJson(res, 200, { ok: true, query, playlists, limit });
     return;
   }
 
@@ -583,11 +614,12 @@ async function synthesizeVoiceCue(body = {}) {
   if (TTS_PROVIDER !== "fish") {
     return {
       ...baseCue,
-      provider: "browser",
-      fallback: true,
-      status: "ready",
-      voiceCueId: createVoiceCueId({ provider: "browser", text, speed }),
-      audioUrl: null,
+      ok: false,
+      provider: TTS_PROVIDER || "none",
+      fallback: false,
+      status: "unavailable",
+      voiceCueId: "",
+      audioUrl: "",
       reason: FISH_AUDIO_API_KEY ? "Fish Audio voice id is not configured" : "Fish Audio API key is not configured",
     };
   }
@@ -604,11 +636,12 @@ async function synthesizeVoiceCue(body = {}) {
   } catch (error) {
     return {
       ...baseCue,
-      provider: "browser",
-      fallback: true,
-      status: "ready",
-      voiceCueId: createVoiceCueId({ provider: "browser", text, speed }),
-      audioUrl: null,
+      ok: false,
+      provider: "fish",
+      fallback: false,
+      status: "error",
+      voiceCueId: "",
+      audioUrl: "",
       error: error instanceof Error ? error.message : "Fish Audio TTS failed",
     };
   }
@@ -779,18 +812,32 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
   await options.onStatus?.("生成 DJ 推荐计划");
 
   const executionMode = route.replyMode === "replace_queue" || route.shouldReplaceQueue ? "playlist" : "chat";
-  const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : limit;
+  const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : getRouteRecommendationLimit(route, limit);
   const plan = routeToRecommendationPlan(route, message, state, tasteContext, clientContext);
   await options.onStatus?.("匹配可播放歌曲");
 
-  let tracks = await resolveRecommendedTracks(plan, state, executionLimit, {
-    tasteContext,
-    clientContext,
-    mode: executionMode,
-  });
-  if (!tracks.length) {
-    const recommendationContext = buildRecommendationFilterContext(state, tasteContext);
-    tracks = await searchMusic(plan.search, executionLimit, {
+  const recommendationContext = buildRecommendationFilterContext(state, tasteContext);
+  let tracks = [];
+
+  if (executionMode === "playlist" && plan.playlistSearchQuery) {
+    await options.onStatus?.("搜索网易云歌单");
+    tracks = await resolvePlaylistSearchTracks(plan, state, executionLimit, {
+      recommendationContext,
+    });
+  }
+
+  if (tracks.length < executionLimit && !plan.strictPlaylistTheme) {
+    const recommendedTracks = await resolveRecommendedTracks(plan, state, executionLimit - tracks.length, {
+      tasteContext,
+      clientContext,
+      mode: executionMode,
+      recommendationContext,
+    });
+    tracks = dedupeRecommendedTracks([...tracks, ...recommendedTracks], recommendationContext).slice(0, executionLimit);
+  }
+
+  if (!tracks.length && !plan.strictPlaylistTheme) {
+    tracks = plan.exactTrackOnly ? [] : await searchMusic(plan.search, executionLimit, {
       playableOnly: false,
       forRecommendation: true,
       recommendationContext,
@@ -873,23 +920,96 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
 function buildDjReply(plan, tracks, options = {}) {
   const mode = normalizeChatMode(options.mode);
   const playableCount = tracks.filter((track) => track.playable && track.url).length;
+  const playableTracks = tracks.filter((track) => track.playable && track.url);
+  const requestedStatus = getRequestedTrackStatus(plan, tracks);
+  const visibleReason = getPublicPlanReason(plan);
 
-  const lines = [
-    cleanVisibleDjLine(plan.say || "已生成推荐"),
-    cleanVisibleDjLine(plan.reason || "按你的请求和本地品味数据整理了一组可播放方向。"),
-  ];
+  const lines = [];
+
+  if (requestedStatus.exactOnly && requestedStatus.missing.length) {
+    lines.push(`没有找到《${requestedStatus.missing[0]}》的可播放结果。`);
+    lines.push("我没有用其他歌曲替代它。");
+  } else {
+    let opening = cleanVisibleDjLine(plan.say || "已整理好这轮推荐。");
+    if (requestedStatus.missing.length && requestedStatus.mentionedInOpening) {
+      opening = `我没找到《${requestedStatus.missing[0]}》，先不拿别的歌冒充。`;
+    }
+    lines.push(opening, visibleReason);
+    if (requestedStatus.included.length) {
+      lines.push(`已优先加入你指定的《${requestedStatus.included.join("》《")}》。`);
+    }
+    if (requestedStatus.missing.length && !requestedStatus.mentionedInOpening) {
+      lines.push(`《${requestedStatus.missing.join("》《")}》没有匹配到可播放结果，所以这次没有替换成同名无关歌曲。`);
+    }
+  }
 
   if (playableCount) {
-    lines.push(
-      mode === "playlist"
-        ? `已生成 ${playableCount} 首可播放歌曲，并替换右侧播放列表。歌名我不在这里重复列出，你可以直接看右侧列表。`
-        : `找到 ${playableCount} 首可添加到队列的歌。`,
-    );
+    if (mode === "playlist") {
+      lines.push(`已生成 ${playableCount} 首可播放歌曲，并替换右侧播放列表。歌名我不在这里重复列出，你可以直接看右侧列表。`);
+    } else {
+      lines.push(`这次先挑 ${playableCount} 首，理由也放在这里：`);
+      playableTracks.slice(0, CHAT_RECOMMENDATION_LIMIT).forEach((track, index) => {
+        lines.push(`${index + 1}. 《${track.title || "未命名"}》 - ${track.artist || "未知艺人"}：${buildRecommendationReasonForTrack(track, plan, index)}`);
+      });
+    }
   } else {
     lines.push("这轮没有找到可直接播放的链接，结果里可能受版权、地区或账号权限限制。");
   }
 
   return lines.join("\n");
+}
+
+function getRequestedTrackStatus(plan = {}, tracks = []) {
+  const queries = Array.isArray(plan.requestedTrackQueries) ? plan.requestedTrackQueries.filter(Boolean) : [];
+  const included = [];
+  const missing = [];
+
+  for (const query of queries) {
+    const matched = tracks.some((track) => isRequestedTrackMatch(track, query));
+    if (matched) included.push(query);
+    else missing.push(query);
+  }
+
+  const normalizedOpening = normalizeSearchText(plan.say || "");
+  return {
+    included,
+    missing,
+    exactOnly: Boolean(plan.exactTrackOnly),
+    mentionedInOpening: missing.some((query) => normalizedOpening.includes(normalizeSearchText(query))),
+  };
+}
+
+function getPublicPlanReason(plan = {}) {
+  const reason = cleanVisibleDjLine(plan.reason || "");
+  if (isInternalRouteText(reason)) {
+    return "按这次请求、当前场景和我的电台口味重新筛了一组更贴近的方向。";
+  }
+  return rewriteTastePersonaText(reason) || "按这次请求、当前场景和我的电台口味重新筛了一组更贴近的方向。";
+}
+
+function buildRecommendationReasonForTrack(track, plan = {}, index = 0) {
+  const source = String(track.recommendSource || track.recommendQuery || "");
+  const tags = Array.isArray(track.tags) ? track.tags.filter(Boolean).slice(0, 2).join("、") : "";
+  const mood = plan.mood || "random";
+
+  if (/similar|simi/i.test(source)) {
+    return "它更像是从我熟悉的口味旁边往外走一步，有新鲜感，但不会和前面的听感断开。";
+  }
+
+  if (/liked-library/i.test(source)) {
+    return tags
+      ? `它在我的歌库脉络里比较稳，${tags} 的气质适合先把这一轮听感立住。`
+      : "它在我的歌库脉络里比较稳，适合当这一轮推荐的锚点。";
+  }
+
+  if (/netease-daily/i.test(source)) {
+    return "这首来自今天的推荐补位，用来给歌单加一点不完全熟悉的新鲜感。";
+  }
+
+  if (mood === "focus") return "它的节奏和情绪不会太抢注意力，适合放在需要专注的时间里。";
+  if (mood === "sleep") return "它的刺激感更低，适合把声音和情绪慢慢放下来。";
+  if (mood === "energy") return "它能把律动往前推一点，适合给这一轮增加一些亮度。";
+  return "它和这次的请求气质比较贴近，可以作为一个顺耳的入口。";
 }
 
 function createRadioHistoryItem({ message, plan, tracks, assistantText, source, createdAt }) {
@@ -947,6 +1067,7 @@ async function attachHostIntrosToPlaylistTracks(tracks, context = {}) {
   const cleanedTracks = tracks.map((track) => ({ ...track, hostIntro: null }));
   const playableTracks = cleanedTracks.filter((track) => track.playable && track.url);
   const targetCount = getHostIntroTargetCount(playableTracks.length);
+  const maxIntroCount = Math.min(HOST_INTRO_MAX_COUNT, playableTracks.length);
 
   if (!targetCount) return cleanedTracks;
 
@@ -955,23 +1076,11 @@ async function attachHostIntrosToPlaylistTracks(tracks, context = {}) {
     try {
       items = await createAiHostIntroItems(cleanedTracks, context, targetCount);
     } catch (error) {
-      console.warn("AI host intro generation failed, falling back to local intros:", error.message);
+      console.warn("AI host intro generation failed; skipping host intros:", error.message);
     }
   }
 
-  if (!items.length) {
-    items = buildLocalHostIntroItems(cleanedTracks, context, targetCount);
-  }
-
-  let withIntros = applyHostIntroItems(cleanedTracks, items, targetCount, context);
-  const introCount = withIntros.filter((track) => track.hostIntro?.displayText).length;
-
-  if (introCount < targetCount) {
-    const fallbackItems = buildLocalHostIntroItems(withIntros, context, targetCount - introCount);
-    withIntros = applyHostIntroItems(withIntros, fallbackItems, targetCount, context);
-  }
-
-  return withIntros;
+  return applyHostIntroItems(cleanedTracks, items, maxIntroCount, context);
 }
 
 function getHostIntroTargetCount(playableCount) {
@@ -979,20 +1088,43 @@ function getHostIntroTargetCount(playableCount) {
   return Math.min(HOST_INTRO_MAX_COUNT, Math.max(Math.ceil(playableCount / 2), Math.ceil(playableCount * HOST_INTRO_COVERAGE_RATIO)));
 }
 
+function getHostIntroCoverageSlots(trackCount, targetCount) {
+  const count = Math.max(0, Math.min(Number(targetCount) || 0, Number(trackCount) || 0));
+  if (!count) return [];
+  if (count === 1) return [0];
+
+  return Array.from({ length: count }, (_, index) =>
+    Math.round((index / (count - 1)) * (trackCount - 1)),
+  );
+}
+
 async function createAiHostIntroItems(tracks, context, targetCount) {
+  const finalPlayableIndex = getFinalPlayableTrackIndex(tracks);
   const payload = {
     request: context.message || "",
     mood: context.plan?.mood || "random",
     playlistReason: context.plan?.reason || "",
     scene: context.plan?.scene || {},
     clientContext: context.clientContext || {},
+    currentIsoTime: new Date().toISOString(),
     targetCount,
+    trackCount: tracks.length,
+    finalPlayableIndex,
+    farewellStartIndex: finalPlayableIndex >= 0 ? Math.max(0, finalPlayableIndex - 2) : -1,
+    introCoverageSlots: getHostIntroCoverageSlots(tracks.length, targetCount),
     tracks: tracks.map(compactHostIntroTrack).slice(0, PLAYLIST_RECOMMENDATION_LIMIT),
   };
 
   if (AI_PROVIDER === "deepseek") return createDeepSeekHostIntroItems(payload);
   if (AI_PROVIDER === "openai") return createOpenAiHostIntroItems(payload);
   return [];
+}
+
+function getFinalPlayableTrackIndex(tracks = []) {
+  for (let index = tracks.length - 1; index >= 0; index -= 1) {
+    if (tracks[index]?.playable && tracks[index]?.url) return index;
+  }
+  return -1;
 }
 
 async function createDeepSeekHostIntroItems(payload) {
@@ -1063,6 +1195,9 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
   const selected = new Set(tracks.map((track, index) => (track.hostIntro?.displayText ? index : -1)).filter((index) => index >= 0));
   const byId = new Map(tracks.map((track, index) => [String(track.id || ""), { track, index }]));
   const result = tracks.map((track) => ({ ...track }));
+  const usedIntroTexts = result
+    .map((track) => cleanHostIntroText(track.hostIntro?.displayText || ""))
+    .filter(Boolean);
 
   for (const item of normalizeHostIntroItems(items)) {
     if (selected.size >= targetCount) break;
@@ -1077,10 +1212,13 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
 
     if (!match?.track?.playable || !match.track.url || selected.has(match.index)) continue;
 
-    const displayText = cleanHostIntroText(item.displayText || item.text || item.intro);
+    let displayText = cleanHostIntroText(item.displayText || item.text || item.intro);
+    if (!displayText) continue;
+    if (isHostIntroTooSimilar(displayText, usedIntroTexts)) continue;
     if (!displayText) continue;
 
     selected.add(match.index);
+    usedIntroTexts.push(displayText);
     result[match.index] = {
       ...result[match.index],
       hostIntro: {
@@ -1107,7 +1245,7 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
         },
         tone: String(item.tone || "context").slice(0, 32),
         moodIntent: String(context.plan?.mood || item.moodIntent || "random").slice(0, 32),
-        source: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
+        source: normalizeHostIntroSource(item),
       },
     };
   }
@@ -1173,80 +1311,37 @@ function normalizeHostIntroItems(items) {
   return [];
 }
 
-function buildLocalHostIntroItems(tracks, context = {}, targetCount) {
-  const playable = tracks
-    .map((track, index) => ({ track, index }))
-    .filter((item) => item.track.playable && item.track.url && !item.track.hostIntro?.displayText);
-  const indexes = selectLocalHostIntroIndexes(playable, targetCount);
+function normalizeHostIntroSource(item = {}) {
+  if (item.source) return String(item.source).slice(0, 40);
+  return AI_PROVIDER === "local" ? "none" : AI_PROVIDER;
+}
 
-  return indexes.map(({ track, index }, order) => {
-    const mood = context.plan?.mood || "random";
-    const style = getTrackStyleLabel(track);
-    const title = track.title ? `《${track.title}》` : "这首歌";
-    const artist = track.artist ? ` - ${track.artist}` : "";
-    const text = buildLocalHostIntroText({ title, artist, style, mood, order });
+function isHostIntroTooSimilar(text, existingTexts = []) {
+  const sentences = getHostIntroSentences(text);
+  const fingerprint = getHostIntroFingerprint(text);
 
-    return {
-      index,
-      trackId: track.id,
-      startAtMs: 0,
-      displayText: text,
-      tone: mood === "energy" ? "energy" : mood === "sleep" ? "night" : mood === "focus" ? "focus" : "comfort",
-      reason: "local playlist flow fallback",
-    };
+  return existingTexts.some((existing) => {
+    const existingSentences = getHostIntroSentences(existing);
+    if (fingerprint && fingerprint === getHostIntroFingerprint(existing)) return true;
+    return sentences.some((sentence) =>
+      sentence.length >= 18 && existingSentences.some((item) => item === sentence),
+    );
   });
 }
 
-function selectLocalHostIntroIndexes(playableItems, targetCount) {
-  const result = [];
-  if (!playableItems.length || targetCount <= 0) return result;
-
-  const count = Math.min(targetCount, playableItems.length);
-  const anchors = count === 1
-    ? [0]
-    : Array.from({ length: count }, (_, index) => Math.round((index / (count - 1)) * (playableItems.length - 1)));
-
-  for (const anchor of anchors) {
-    const item = playableItems[Math.max(0, Math.min(playableItems.length - 1, anchor))];
-    if (item && !result.some((selected) => selected.index === item.index)) result.push(item);
-    if (result.length >= count) break;
-  }
-
-  for (const item of playableItems) {
-    if (result.length >= count) break;
-    if (!result.some((selected) => selected.index === item.index)) result.push(item);
-  }
-
-  return result.slice(0, count);
+function getHostIntroSentences(text) {
+  return cleanHostIntroText(text)
+    .replace(/《[^》]+》/g, "《Song》")
+    .split(/[。！？!?；;]/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
 }
 
-function buildLocalHostIntroText({ title, artist, style, mood, order }) {
-  if (mood === "energy") {
-    return order === 0
-      ? `${title}${artist} 放在开头，是想先把房间里的空气点亮一点。它的 ${style} 线索会比情绪更早出现，像主持人把推子慢慢推上去，不催你立刻兴奋，只是让身体先跟上节拍。`
-      : `${title} 会把这段歌单往更明亮的方向推一下。你可以先听鼓点和低频怎么把空间撑起来，等它稳定以后，精神会自然从刚才的疲惫里抬一点头。`;
-  }
-
-  if (mood === "sleep") {
-    return order === 0
-      ? `${title}${artist} 放在这里，是想让声音先轻下来。今天先不用急着总结，也不用把所有事都处理完，前奏进来的时候，你只要把注意力放到呼吸上，让这首歌慢慢接住你。`
-      : `${title} 的 ${style} 气质比较柔，适合把刚才的情绪收一收。它不是那种用力安慰人的歌，更像夜里有人把灯调暗一点，给你留出一块不必解释的安静。`;
-  }
-
-  if (mood === "focus") {
-    return order === 0
-      ? `${title}${artist} 先铺一个稳定入口。它的 ${style} 气质不会抢走太多注意力，但能给工作台留下一点节奏感；你不用逼自己马上进入状态，让音乐先把注意力扶住。`
-      : `${title} 适合放在这段中间，像电台节目里的一个小转场。刚才如果已经听进去一点，现在就让这首歌帮脑子换一口气，再继续往前做手上的事。`;
-  }
-
-  return order === 0
-    ? `${title}${artist} 先开场。它不是急着把情绪推高，更像把今天的声音慢慢调到合适的位置。你可以先听它的 ${style} 质感，等旋律站稳，这段歌单也就真正开始了。`
-    : `${title} 的 ${style} 线索很适合在这里停一下。如果你有点累，就让这一首先陪你缓一缓；如果你只是想换个心情，也可以把它当成路上的一盏灯，经过就好。`;
-}
-
-function getTrackStyleLabel(track) {
-  const tags = Array.isArray(track.tags) ? track.tags.filter(Boolean) : [];
-  return tags[0] || track.album || "听感";
+function getHostIntroFingerprint(text) {
+  return cleanHostIntroText(text)
+    .replace(/《[^》]+》/g, "《Song》")
+    .replace(/\s+/g, "")
+    .slice(0, 160);
 }
 
 function cleanHostIntroText(text) {
@@ -1270,14 +1365,30 @@ function clampMs(value, fallback, min, max) {
 }
 
 function cleanVisibleDjLine(text) {
-  return String(text || "")
+  return rewriteTastePersonaText(String(text || ""))
     .replace(/^Faye\s*/, "")
     .replace(/^收到[，,。\s]*/, "")
     .replace(/^好的[，,。\s]*/, "")
     .replace(/^明白[，,。\s]*/, "")
-    .replace(/优先从喜欢歌单选歌，并避开最近的[^\n。]*[。]?/g, "按你的喜欢歌单和相邻风格做了筛选。")
+    .replace(/优先从喜欢歌单选歌，并避开最近的[^\n。]*[。]?/g, "按我的歌库和相邻风格做了筛选。")
     .replace(/避开(?:了)?最近(?:播放)?的?[^\n。]*[。]?/g, "")
     .trim();
+}
+
+function rewriteTastePersonaText(text) {
+  return String(text || "")
+    .replace(/你的本地听歌偏好/g, "我的电台口味")
+    .replace(/你的听歌偏好/g, "我的电台口味")
+    .replace(/你的音乐偏好/g, "我的音乐偏好")
+    .replace(/你的偏好/g, "我的偏好")
+    .replace(/你的口味/g, "我的口味")
+    .replace(/你熟悉的口味/g, "我熟悉的口味")
+    .replace(/你的喜欢歌单/g, "我的歌库")
+    .replace(/你的收藏口味/g, "我的收藏口味")
+    .replace(/你的收藏脉络/g, "我的歌库脉络")
+    .replace(/你的收藏/g, "我的歌库")
+    .replace(/你的曲库/g, "我的歌库")
+    .replace(/本地听歌偏好/g, "我的电台口味");
 }
 
 function summarizeTasteContext(tasteContext) {
@@ -1491,7 +1602,8 @@ async function resolveIntentRoute(message, mode, tasteContext, clientContext = {
         mood: "random",
         scene: "unknown",
         queryHints: extractRequestKeywords(message),
-        reason: "Playlist button route.",
+        answer: "我会按这次的状态排成一整段歌单。",
+        reason: "这是一次明确的歌单生成请求。",
       },
       message,
       clientContext,
@@ -1499,7 +1611,7 @@ async function resolveIntentRoute(message, mode, tasteContext, clientContext = {
   }
 
   const hardRoute = inferHardRoute(message);
-  if (hardRoute) return normalizeIntentRoute(hardRoute, message, clientContext);
+  if (hardRoute && hardRoute.intent !== "recommend") return normalizeIntentRoute(hardRoute, message, clientContext);
 
   return createAiIntentRoute(message, tasteContext, clientContext);
 }
@@ -1566,6 +1678,25 @@ function inferHardRoute(message) {
   }
 
   if (
+    /歌单|经典曲目|相关曲目|主题曲目|OST|ost|OP|ED|playlist/i.test(String(message || "")) &&
+    /找|搜索|重温|想听|推荐|来点|放点|帮我/i.test(String(message || ""))
+  ) {
+    return {
+      intent: "playlist",
+      confidence: 0.92,
+      shouldSearchMusic: true,
+      shouldReplaceQueue: true,
+      shouldShowTrackCards: false,
+      replyMode: "replace_queue",
+      mood: "random",
+      scene: "unknown",
+      queryHints: extractRequestKeywords(message),
+      answer: "我会按这个主题找网易云歌单里的曲目。",
+      reason: "这是一次明确的主题歌单请求。",
+    };
+  }
+
+  if (
     containsAny(text, [
       "生成歌单",
       "推荐歌单",
@@ -1586,7 +1717,8 @@ function inferHardRoute(message) {
       mood: "random",
       scene: "unknown",
       queryHints: extractRequestKeywords(message),
-      reason: "Explicit playlist request.",
+      answer: "我会把它排成一段完整歌单。",
+      reason: "这是一次明确的歌单生成请求。",
     };
   }
 
@@ -1614,7 +1746,9 @@ function inferHardRoute(message) {
       mood: "random",
       scene: "unknown",
       queryHints: extractRequestKeywords(message),
-      reason: "Explicit recommendation request.",
+      recommendationCount: extractRequestedSongCount(message) || 4,
+      answer: "我挑几首更贴近你说的方向。",
+      reason: "这是一次明确的听歌推荐请求。",
     };
   }
 
@@ -1639,7 +1773,8 @@ function inferHardRoute(message) {
       mood: "random",
       scene: "chat",
       queryHints: [],
-      reason: "Explicit recommendation reasoning question.",
+      answer: "可以，我解释一下刚才的推荐依据。",
+      reason: "用户在追问推荐依据。",
     };
   }
 
@@ -1740,7 +1875,8 @@ function createLocalIntentRoute(message) {
     mood: "random",
     scene: "chat",
     queryHints: [],
-    reason: "Ambiguous request; default to chat-only to avoid accidental recommendations.",
+    answer: "这句我先按聊天理解，不直接改播放列表。",
+    reason: "请求不够明确，先不触发推荐或播放。",
   };
 }
 
@@ -1821,8 +1957,33 @@ function normalizeIntentRoute(route, message, clientContext = {}) {
     scene: String(route?.scene || "unknown").slice(0, 40),
     queryHints: normalizeRouteQueryHints(route, message),
     answer: cleanVisibleDjLine(String(route?.answer || "").slice(0, 360)),
-    reason: cleanVisibleDjLine(String(route?.reason || "").slice(0, 220)),
+    reason: sanitizePublicRouteText(route?.reason, "按请求整理推荐方向。"),
+    recommendationCount: normalizeRouteRecommendationCount(route?.recommendationCount),
   };
+}
+
+function sanitizePublicRouteText(value, fallback = "") {
+  const text = cleanVisibleDjLine(String(value || "").slice(0, 220));
+  return isInternalRouteText(text) ? fallback : text || fallback;
+}
+
+function isInternalRouteText(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  if (!/[\u3400-\u9fff]/u.test(text)) return true;
+  return /\b(route|intent|explicit|button|fallback|chat[-_ ]?only|recommendation request|playlist request)\b/i.test(text);
+}
+
+function normalizeRouteRecommendationCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.max(2, Math.min(CHAT_RECOMMENDATION_LIMIT, Math.floor(number)));
+}
+
+function getRouteRecommendationLimit(route, fallbackLimit) {
+  const requested = normalizeRouteRecommendationCount(route?.recommendationCount);
+  if (requested) return requested;
+  return Math.max(1, Math.min(CHAT_RECOMMENDATION_LIMIT, Number(fallbackLimit) || CHAT_RECOMMENDATION_LIMIT));
 }
 
 function normalizeConfidence(value) {
@@ -1847,14 +2008,17 @@ function normalizeRouteQueryHints(route, message) {
 function routeToRecommendationPlan(route, message, state, tasteContext, clientContext = {}) {
   const fallback = createProfilePlan(message, state, tasteContext, clientContext);
   const routeQueries = route.queryHints?.length ? route.queryHints : [];
+  const requestedTrackQueries = getRequestedTrackQueriesForPlan(message, route, routeQueries);
+  const playlistSearchQuery = getPlaylistSearchQueryForPlan(message, routeQueries);
   const mood = route.mood || fallback.mood;
-  const keywords = [...new Set([...routeQueries, ...(fallback.scene?.keywords || [])])].slice(0, 16);
+  const keywords = [...new Set([playlistSearchQuery, ...requestedTrackQueries, ...routeQueries, ...(fallback.scene?.keywords || [])].filter(Boolean))].slice(0, 16);
   const scene = {
     ...fallback.scene,
     mood,
     keywords,
   };
-  const seedQueries = (routeQueries.length ? routeQueries : keywords).map((query, index) => ({
+  const seedQueryValues = [...new Set([...requestedTrackQueries, ...(routeQueries.length ? routeQueries : keywords)])];
+  const seedQueries = seedQueryValues.map((query, index) => ({
     query,
     intent: route.reason || "intent-route",
     weight: Math.max(1, keywords.length - index),
@@ -1864,13 +2028,62 @@ function routeToRecommendationPlan(route, message, state, tasteContext, clientCo
     ...fallback,
     intent: route.intent === "playlist" ? "playlist" : "recommend",
     say: cleanVisibleDjLine(route.answer || fallback.say),
-    reason: cleanVisibleDjLine(route.reason || fallback.reason),
+    reason: sanitizePublicRouteText(route.reason, fallback.reason),
     mood,
-    search: routeQueries[0] || fallback.search,
+    search: requestedTrackQueries[0] || routeQueries[0] || fallback.search,
     seedQueries,
     queue: seedQueries.map((item) => item.query),
     scene,
+    requestedTrackQueries,
+    playlistSearchQuery,
+    strictPlaylistTheme: Boolean(playlistSearchQuery && route.intent === "playlist"),
+    exactTrackOnly: requestedTrackQueries.length > 0 && isExactTrackSearchRequest(message),
   };
+}
+
+function getPlaylistSearchQueryForPlan(message, routeQueries = []) {
+  const raw = String(message || "");
+  const wantsExternalPlaylist = /找|搜索|搜|重温|相关|主题|经典|曲目|ost|op|ed|原声|合集|playlist/i.test(raw);
+  if (!wantsExternalPlaylist) return "";
+
+  const knownTheme = getKnownThemeQuery(raw);
+  if (knownTheme) return knownTheme;
+
+  const cleaned = raw
+    .replace(/今晚|夜晚|晚上|想听|想重温|重温一下|你能|能不能|可以|帮我|找一下|找一份|找|搜索|相关|相似|里面的|高度|主题|经典曲目|曲目|歌单|音乐|歌曲|吗|呢|吧/gu, " ")
+    .replace(/[，。！？,.!?、]/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+
+  if (cleaned.length >= 2 && cleaned.length <= 40) return cleaned;
+
+  return routeQueries.find((query) => String(query || "").trim().length >= 2) || "";
+}
+
+function getKnownThemeQuery(value) {
+  const text = normalizeSearchText(value);
+  if (containsAny(text, ["进击的巨人", "進撃の巨人", "attackontitan", "shingekinokyojin", "巨人ost", "巨人op", "巨人ed"])) {
+    return "进击的巨人 OST OP ED";
+  }
+
+  return "";
+}
+
+function getRequestedTrackQueriesForPlan(message, route = {}, routeQueries = []) {
+  const extracted = extractRequestedTrackQueries(message);
+  if (extracted.length) return extracted;
+  if (!mentionsSpecificTrackRequest(message)) return [];
+
+  const values = [];
+  if (route?.search) values.push(route.search);
+  values.push(...routeQueries);
+
+  return [...new Set(values.map(cleanRequestedTrackQuery).filter(Boolean))].slice(0, 4);
+}
+
+function mentionsSpecificTrackRequest(message) {
+  const text = normalizeSearchText(message);
+  return containsAny(text, ["想听", "这首歌", "这歌", "单独搜索", "指定", "加进去", "加入", "没看见", "没有看见", "在哪里", "在哪"]);
 }
 
 async function createRoutedChatResponse(message, state, tasteContext, route) {
@@ -1891,7 +2104,7 @@ async function createRoutedChatResponse(message, state, tasteContext, route) {
     plan: {
       intent: route.intent,
       say: route.answer ? route.answer.slice(0, 60) : "只聊这轮内容",
-      reason: route.reason || "This route does not request music search.",
+      reason: route.reason || "这轮请求不是推荐播放任务。",
       mood: route.mood || "random",
       search: "",
       seedQueries: [],
@@ -2010,8 +2223,8 @@ function createProfilePlan(message, state, tasteContext, clientContext = {}) {
 
   return {
     intent: "recommend",
-    say: mood === "energy" ? "这轮把节奏提亮一点" : mood === "sleep" ? "这轮把声音放轻一点" : "按你的口味排好了",
-    reason: `按你的喜欢歌单、相邻风格和当前场景做了筛选。${baseReason}`,
+    say: mood === "energy" ? "这轮把节奏提亮一点" : mood === "sleep" ? "这轮把声音放轻一点" : "按我的口味排好了",
+    reason: `按我的歌库、相邻风格和当前场景做了筛选。${baseReason}`,
     mood,
     search: scene.keywords[0] || "liked-library",
     seedQueries: scene.keywords.map((query, index) => ({
@@ -2209,7 +2422,7 @@ function buildInformationalChatReply(message, tasteContext, intent) {
   const song = findReferencedProfileSong(message, profileSongs, tasteContext.nowPlaying);
   if (song) return buildSongChatReply(song);
 
-  return "可以，只聊这件事，不动播放队列。把歌名、歌手或你想聊的点说具体一点，我会按你的曲库和听感线索接着聊。";
+  return "可以，只聊这件事，不动播放队列。把歌名、歌手或你想聊的点说具体一点，我会按我的歌库和听感线索接着聊。";
 }
 
 function asksRecommendationLogic(message) {
@@ -2235,12 +2448,12 @@ function buildRecommendationLogicReply(tasteContext) {
   const currentMood = tasteContext.nowPlaying?.mood || "";
   const currentQueue = Array.isArray(tasteContext.currentQueue) ? tasteContext.currentQueue.length : 0;
   const signals = [
-    styleTags.length ? `你的曲库里 ${styleTags.join(" / ")} 权重比较高` : "你的喜欢歌单是主要口味锚点",
+    styleTags.length ? `我的歌库里 ${styleTags.join(" / ")} 权重比较高` : "我的歌库是主要口味锚点",
     currentMood ? `当前氛围偏 ${translateMoodForReply(currentMood)}` : "",
     currentQueue ? "同时会参考右侧队列的整体方向，避免风格突然断开" : "",
   ].filter(Boolean);
 
-  return `这次的逻辑是先看你的收藏口味，再按当前场景收窄到相邻风格。\n${signals.join("；")}。\n我不会把内部过滤掉的歌名展开，聊天里只保留听感和方向。`;
+  return `这次的逻辑是先看我的收藏口味，再按当前场景收窄到相邻风格。\n${signals.join("；")}。\n我不会把内部过滤掉的歌名展开，聊天里只保留听感和方向。`;
 }
 
 function translateMoodForReply(value) {
@@ -2254,7 +2467,7 @@ function translateMoodForReply(value) {
 }
 
 function buildLibraryQueryReply(message, songs) {
-  if (!songs.length) return "我还没读到本地喜欢歌单画像，所以暂时查不到哪些是新歌。";
+  if (!songs.length) return "我还没读到本地歌单画像，所以暂时查不到哪些是新歌。";
 
   const text = normalizeSearchText(message);
   const byRelease = containsAny(text, ["发行", "发布", "新发行", "今年", "2026", "2025"]);
@@ -2268,9 +2481,9 @@ function buildLibraryQueryReply(message, songs) {
 
   if (!ranked.length) return "本地歌单画像里没有足够的时间信息，暂时排不出新歌列表。";
 
-  const heading = byRelease ? "按发行年份看，收藏里比较新的歌是：" : "按加入喜欢歌单的时间看，最近新增的是：";
+  const heading = byRelease ? "按发行年份看，我收藏里比较新的歌是：" : "按加入我的歌库的时间看，最近新增的是：";
   const lines = ranked.map((song, index) => {
-    const date = byRelease ? `${song.publishYear || "未知年份"}发行` : `${formatShortDate(song.addedAt)}加入`;
+    const date = byRelease ? `${song.publishYear || "未知年份"}发行` : `${formatShortDate(song.addedAt)}加入我的歌库`;
     const tags = (song.styleTags || []).slice(0, 2).join(" / ");
     return `${index + 1}. ${formatSongName(song)}（${date}${tags ? `，${tags}` : ""}）`;
   });
@@ -2283,13 +2496,13 @@ function buildSongChatReply(song) {
   const style = song.primaryStyle || tags[0] || "风格标签不明显";
   const meta = [
     song.publishYear ? `${song.publishYear}年发行` : "",
-    song.addedAt ? `${formatShortDate(song.addedAt)}加入喜欢歌单` : "",
+    song.addedAt ? `${formatShortDate(song.addedAt)}加入我的歌库` : "",
     song.allTimePlayCount ? `历史播放 ${song.allTimePlayCount} 次` : "",
   ].filter(Boolean);
   const feel = describeSongFeel(tags, style);
 
   return [
-    `《${song.title}》在你的曲库里更接近 ${style}。`,
+    `《${song.title}》在我的歌库里更接近 ${style}。`,
     tags.length ? `标签是：${tags.join(" / ")}。` : "",
     feel,
     meta.length ? meta.join("，") + "。" : "",
@@ -2428,8 +2641,8 @@ function createLocalPlan(message, state) {
   const search = artistMatch?.[1]?.trim() || "私人雷达";
 
   return {
-    say: "按你的口味试播",
-    reason: "先用你的输入做网易云搜索，再根据喜欢和不喜欢继续收敛。",
+    say: "按我的口味试播",
+    reason: "先用这次输入做网易云搜索，再根据我的喜欢和不喜欢继续收敛。",
     mood: "random",
     search,
     queue: [search, "私人雷达"],
@@ -2471,20 +2684,129 @@ async function buildTasteContext(state, conversation = [], clientContext = {}) {
 
 async function resolveRecommendedTracks(plan, state, limit = CHAT_RECOMMENDATION_LIMIT, options = {}) {
   const recommendationContext = buildRecommendationFilterContext(state, options.tasteContext);
+  const requestedTracks = await resolveRequestedTrackCandidates(plan, state, Math.min(limit, CHAT_RECOMMENDATION_LIMIT), {
+    ...options,
+    recommendationContext,
+  });
+
+  if (plan.exactTrackOnly) return requestedTracks.slice(0, limit);
+
+  const remainingLimit = Math.max(0, limit - requestedTracks.length);
+  if (!remainingLimit) return requestedTracks.slice(0, limit);
+
   const profileTracks = await resolveProfileRecommendedTracks(plan, state, limit, {
     ...options,
     recommendationContext,
   });
 
-  if (profileTracks.length >= limit) return profileTracks.slice(0, limit);
+  if (profileTracks.length >= remainingLimit) {
+    return dedupeRecommendedTracks([...requestedTracks, ...profileTracks], recommendationContext).slice(0, limit);
+  }
 
-  const fallbackTracks = await resolveSearchRecommendedTracks(plan, state, limit - profileTracks.length, {
+  const fallbackTracks = await resolveSearchRecommendedTracks(plan, state, remainingLimit - profileTracks.length, {
     ...options,
     recommendationContext,
   });
-  const merged = dedupeRecommendedTracks([...profileTracks, ...fallbackTracks], recommendationContext);
+  const merged = dedupeRecommendedTracks(weaveTrackGroups(profileTracks, fallbackTracks, limit), recommendationContext);
 
-  return merged.slice(0, limit);
+  return dedupeRecommendedTracks([...requestedTracks, ...merged], recommendationContext).slice(0, limit);
+}
+
+async function resolvePlaylistSearchTracks(plan, state, limit = PLAYLIST_RECOMMENDATION_LIMIT, options = {}) {
+  const query = String(plan.playlistSearchQuery || plan.search || "").trim();
+  if (!query || limit <= 0 || !NCM_API_BASE) return [];
+
+  const recommendationContext = options.recommendationContext || buildRecommendationFilterContext(state);
+  const playlists = rankNcmPlaylists(query, await searchNcmPlaylists(query, NCM_PLAYLIST_SEARCH_LIMIT)).slice(0, 5);
+  const tracks = [];
+  const seen = new Set();
+
+  for (const playlist of playlists) {
+    if (tracks.length >= limit) break;
+
+    const playlistTracks = await getPlaylistTracks(playlist.id, NCM_PLAYLIST_TRACK_PROBE_LIMIT, 0);
+    for (const track of playlistTracks) {
+      if (tracks.length >= limit) break;
+      if (!track.playable || !isReasonableRecommendationTrack(track)) continue;
+      if (shouldRejectRecommendationTrack(track, state, recommendationContext)) continue;
+      const identity = trackIdentity(track);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      tracks.push({
+        ...track,
+        recommendSource: "playlist-search",
+        recommendQuery: query,
+        sourcePlaylistId: playlist.id,
+        sourcePlaylistName: playlist.name,
+      });
+    }
+  }
+
+  return dedupeRecommendedTracks(tracks, recommendationContext).slice(0, limit);
+}
+
+async function resolveRequestedTrackCandidates(plan, state, limit, options = {}) {
+  const queries = Array.isArray(plan.requestedTrackQueries) ? plan.requestedTrackQueries : [];
+  if (!queries.length || limit <= 0) return [];
+
+  const tracks = [];
+  const recommendationContext = options.recommendationContext || buildRecommendationFilterContext(state, options.tasteContext);
+
+  for (const query of queries) {
+    if (tracks.length >= limit) break;
+    const found = await searchMusic(query, 8, {
+      playableOnly: false,
+      recommendationContext,
+    });
+    const candidate = selectRequestedTrackCandidate(found, query, recommendationContext);
+    if (!candidate) continue;
+    if (tracks.some((track) => trackIdentity(track) === trackIdentity(candidate))) continue;
+    tracks.push({
+      ...candidate,
+      recommendSource: "requested-track",
+      recommendQuery: query,
+      userRequested: true,
+    });
+  }
+
+  return tracks.slice(0, limit);
+}
+
+function selectRequestedTrackCandidate(tracks, query, recommendationContext) {
+  return (Array.isArray(tracks) ? tracks : [])
+    .map((track) => ({ track, score: scoreRequestedTrackMatch(track, query, recommendationContext) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.track || null;
+}
+
+function scoreRequestedTrackMatch(track, query, recommendationContext) {
+  const normalizedQuery = normalizeSearchText(query);
+  const title = normalizeSearchText(track?.title);
+  const cleanTitle = normalizeSongTitleForMatch(track?.title);
+  const haystack = normalizeSearchText(`${track?.title || ""}${track?.artist || ""}${track?.album || ""}`);
+  if (!normalizedQuery || !title) return 0;
+
+  let score = 0;
+  if (title === normalizedQuery) score += 1000;
+  else if (cleanTitle === normalizedQuery) score += 980;
+  else if (title.includes(normalizedQuery) || normalizedQuery.includes(title)) score += 620;
+  else if (cleanTitle.includes(normalizedQuery) || normalizedQuery.includes(cleanTitle)) score += 600;
+  else if (getTextSimilarity(cleanTitle || title, normalizedQuery) >= 0.8) score += 540;
+  else if (haystack.includes(normalizedQuery)) score += 320;
+  else return 0;
+
+  if (track.playable && track.url) score += 140;
+  if (track.duration && track.duration <= MAX_RECOMMENDATION_DURATION_MS) score += 30;
+  if (isAlternateVersionTitle(track?.title)) score -= 90;
+
+  const expectedArtists = findKnownArtistsForTitle(title, recommendationContext);
+  if (expectedArtists) {
+    const artists = splitArtistNames(track.artist).map(normalizeSearchText).filter(Boolean);
+    if (artists.some((artist) => artistMatchesAny(artist, expectedArtists))) score += 180;
+    else score -= 260;
+  }
+
+  return score;
 }
 
 async function resolveProfileRecommendedTracks(plan, state, limit, options = {}) {
@@ -2496,6 +2818,7 @@ async function resolveProfileRecommendedTracks(plan, state, limit, options = {})
   const recommendationContext = options.recommendationContext || buildRecommendationFilterContext(state, options.tasteContext);
   const recentIds = new Set((state.plays || []).slice(-50).map((track) => String(track.id || "")).filter(Boolean));
   const currentQueueIds = new Set((state.queue || []).map((track) => String(track.id || "")).filter(Boolean));
+  const recentRadioIds = getRecentRadioHistoryTrackIds(state);
   const likedIds = new Set(profileSongs.map((song) => String(song.id)).filter(Boolean));
   const similarTarget = limit >= 3 ? Math.max(1, Math.floor(limit * (1 - PROFILE_RECOMMENDATION_LIKED_RATIO))) : 0;
   const likedTarget = Math.max(1, limit - similarTarget);
@@ -2505,6 +2828,8 @@ async function resolveProfileRecommendedTracks(plan, state, limit, options = {})
     state,
     recentIds,
     currentQueueIds,
+    recentRadioIds,
+    runSalt: getRadioHistorySalt(state),
   }).slice(0, PROFILE_RECOMMENDATION_CANDIDATE_LIMIT);
   const likedTracks = await enrichProfileSongCandidates(
     rankedSongs,
@@ -2512,24 +2837,27 @@ async function resolveProfileRecommendedTracks(plan, state, limit, options = {})
     state,
     recommendationContext,
   );
-  const tracks = [...likedTracks];
+  const similarTracks = [];
 
   if (similarTarget > 0 && likedTracks.length) {
     const similarSeeds = likedTracks
       .slice(0, Math.max(NCM_SIMILAR_SEED_LIMIT, Math.ceil(similarTarget / 2)))
       .map((track) => ({ id: track.id, title: track.title, artist: track.artist, provider: "netease" }));
-    const similarTracks = await getSimilarTracks(similarSeeds, similarTarget, recommendationContext, {
+    const fetchedSimilarTracks = await getSimilarTracks(similarSeeds, similarTarget, recommendationContext, {
       excludedIds: likedIds,
     });
 
-    for (const track of similarTracks) {
-      if (tracks.length >= limit) break;
+    for (const track of fetchedSimilarTracks) {
       if (shouldRejectRecommendationTrack(track, state, recommendationContext)) continue;
-      if (tracks.some((item) => trackIdentity(item) === trackIdentity(track))) continue;
-      if (hasKnownTitleDuplicate(tracks, track, recommendationContext)) continue;
-      tracks.push({ ...track, recommendSource: "similar-song" });
+      if (likedTracks.some((item) => trackIdentity(item) === trackIdentity(track))) continue;
+      if (similarTracks.some((item) => trackIdentity(item) === trackIdentity(track))) continue;
+      if (hasKnownTitleDuplicate([...likedTracks, ...similarTracks], track, recommendationContext)) continue;
+      similarTracks.push({ ...track, recommendSource: "similar-song" });
+      if (similarTracks.length >= similarTarget) break;
     }
   }
+
+  let tracks = weaveTrackGroups(likedTracks, similarTracks, limit);
 
   if (tracks.length < limit) {
     const extraLiked = await enrichProfileSongCandidates(
@@ -2539,7 +2867,7 @@ async function resolveProfileRecommendedTracks(plan, state, limit, options = {})
       recommendationContext,
       new Set(tracks.map((track) => String(track.id))),
     );
-    tracks.push(...extraLiked);
+    tracks = weaveTrackGroups(tracks, extraLiked, limit);
   }
 
   return dedupeRecommendedTracks(tracks, recommendationContext).slice(0, limit);
@@ -2551,13 +2879,13 @@ function rankProfileSongs(songs, context) {
   return songs
     .map((song) => ({
       song,
-      score: scoreProfileSong(song, context) + seededJitter(`${seed}:${song.id}`),
+      score: scoreProfileSong(song, context) + seededJitter(`${seed}:${context.runSalt || ""}:${song.id}`),
     }))
     .sort((a, b) => b.score - a.score)
     .map(({ song }) => song);
 }
 
-function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds }) {
+function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds, recentRadioIds }) {
   const text = normalizeSearchText(
     `${song.title} ${song.artist} ${song.album} ${(song.styleTags || []).join(" ")}`,
   );
@@ -2571,6 +2899,7 @@ function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds
   }, 0);
   const recentPenalty = recentIds.has(String(song.id)) ? -28 : 0;
   const queuePenalty = currentQueueIds.has(String(song.id)) ? -18 : 0;
+  const recentRadioPenalty = recentRadioIds?.has(String(song.id)) ? -72 : 0;
   const playScore = Math.log1p(Number(song.allTimePlayCount || 0)) * 8 + Number(song.weeklyPlayCount || 0) * 5;
   const addedScore = scoreAddedAt(song.addedAt);
   const eraScore = scoreEra(song, scene);
@@ -2578,7 +2907,23 @@ function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds
   const requestBoost = plan.search && text.includes(normalizeSearchText(plan.search)) ? 14 : 0;
   const preferenceScore = scoreScenePreference(song, scene, state);
 
-  return 50 + keywordMatches + styleMatches + playScore + addedScore + eraScore + moodScore + requestBoost + preferenceScore + recentPenalty + queuePenalty;
+  return 50 + keywordMatches + styleMatches + playScore + addedScore + eraScore + moodScore + requestBoost + preferenceScore + recentPenalty + queuePenalty + recentRadioPenalty;
+}
+
+function getRecentRadioHistoryTrackIds(state) {
+  const ids = new Set();
+  const radios = Array.isArray(state.radioHistory) ? state.radioHistory.slice(0, RADIO_HISTORY_REPEAT_PENALTY_LIMIT) : [];
+  for (const radio of radios) {
+    for (const track of radio?.tracks || []) {
+      if (track?.id) ids.add(String(track.id));
+    }
+  }
+  return ids;
+}
+
+function getRadioHistorySalt(state) {
+  const radios = Array.isArray(state.radioHistory) ? state.radioHistory.slice(0, 3) : [];
+  return `${radios.length}:${radios.map((radio) => radio?.id || radio?.createdAt || "").join("|")}`;
 }
 
 async function enrichProfileSongCandidates(songs, limit, state, recommendationContext, excludedIds = new Set()) {
@@ -2669,13 +3014,16 @@ async function resolveSearchRecommendedTracks(plan, state, limit = CHAT_RECOMMEN
 
   if (deduped.length < limit) {
     const dailyTracks = await getDailyRecommendedTracks(limit - deduped.length, recommendationContext);
+    const acceptedDailyTracks = [];
     for (const track of dailyTracks) {
-      if (deduped.length >= limit) break;
+      if (acceptedDailyTracks.length >= limit - deduped.length) break;
       if (shouldRejectRecommendationTrack(track, state, recommendationContext)) continue;
       if (deduped.some((item) => trackIdentity(item) === trackIdentity(track))) continue;
+      if (acceptedDailyTracks.some((item) => trackIdentity(item) === trackIdentity(track))) continue;
       if (hasKnownTitleDuplicate(deduped, track, recommendationContext)) continue;
-      deduped.push({ ...track, recommendQuery: "netease-daily" });
+      acceptedDailyTracks.push({ ...track, recommendQuery: "netease-daily" });
     }
+    return dedupeRecommendedTracks(weaveTrackGroups(deduped, acceptedDailyTracks, limit), recommendationContext).slice(0, limit);
   }
 
   return deduped.slice(0, limit);
@@ -2795,6 +3143,26 @@ function dedupeRecommendedTracks(tracks, recommendationContext) {
   }
 
   return result;
+}
+
+function weaveTrackGroups(primaryTracks, secondaryTracks, limit = PLAYLIST_RECOMMENDATION_LIMIT) {
+  const primary = Array.isArray(primaryTracks) ? primaryTracks.filter(Boolean) : [];
+  const secondary = Array.isArray(secondaryTracks) ? secondaryTracks.filter(Boolean) : [];
+  if (!secondary.length) return primary.slice(0, limit);
+  if (!primary.length) return secondary.slice(0, limit);
+
+  const result = [...primary];
+  const total = Math.min(limit, primary.length + secondary.length);
+  const slots = secondary.map((_, index) =>
+    Math.max(1, Math.round(((index + 1) * total) / (secondary.length + 1))),
+  );
+
+  secondary.forEach((track, index) => {
+    const insertAt = Math.max(0, Math.min(result.length, slots[index] + index));
+    result.splice(insertAt, 0, track);
+  });
+
+  return result.slice(0, limit);
 }
 
 function hasKnownTitleDuplicate(tracks, candidate, recommendationContext) {
@@ -3058,11 +3426,128 @@ function getWeightedMapScore(map, values, weight) {
 }
 
 function extractRequestKeywords(message) {
-  return String(message || "")
+  const raw = String(message || "");
+  const values = [];
+  values.push(...extractRequestedTrackQueries(raw));
+  const artistMatch = raw.match(/([\p{L}\p{N}·・]{2,20})的(?:其他)?(?:歌|歌曲|作品)/u);
+  if (artistMatch?.[1]) {
+    values.push(artistMatch[1], `${artistMatch[1]} 其他歌曲`, `${artistMatch[1]} 相似歌曲`);
+  }
+
+  values.push(...raw
     .split(/[\s,，。.!?！？、/]+/)
     .map((item) => item.trim())
     .filter((item) => item.length >= 2 && item.length <= 24)
-    .slice(0, 8);
+    .filter((item) => !/^(推荐|几首|其他|类似|歌曲|歌手|给我|帮我|来点|放点)$/u.test(item)));
+
+  return [...new Set(values)].slice(0, 8);
+}
+
+function extractRequestedTrackQueries(message) {
+  const raw = String(message || "");
+  const values = [];
+  const patterns = [
+    /[《「『“"]([^《》「」『』“”"]{2,50})[》」』”"]/gu,
+    /想听(?:的)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌|在里面|在哪里|在哪|也加|加进|加入|加到|$)/gu,
+    /(?:单独)?(?:搜索|搜|找)(?:一下|出来)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌|$)/gu,
+    /(?:把|将)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌)?\s*(?:也)?(?:加进|加入|加到)/gu,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of raw.matchAll(pattern)) {
+      const title = cleanRequestedTrackQuery(match[1]);
+      if (title) values.push(title);
+    }
+  }
+
+  return [...new Set(values)].slice(0, 4);
+}
+
+function cleanRequestedTrackQuery(value) {
+  let text = String(value || "")
+    .replace(/^(?:我想听的?|想听的?|帮我|给我|请|麻烦|单独|搜索|搜|找|把|将|另外|顺便|可以|能不能|能帮我)+/u, "")
+    .replace(/(?:这首歌|这首|这歌|歌曲|歌|在哪里|在哪|在里面|里面|也|加进去|加进来|加入|加到|出来|吗|呢|啊|吧)+$/u, "")
+    .trim();
+
+  text = text.replace(/^[的\s]+|[的\s]+$/gu, "").trim();
+  const normalized = normalizeSearchText(text);
+  if (normalized.length < 2 || normalized.length > 40) return "";
+  if (/^(推荐|歌单|通勤歌单|歌曲|搜索|单独搜索|播放|添加|加入|可以欢快一点)$/u.test(text)) return "";
+  if (QUERY_MODIFIER_TERMS.has(normalized)) return "";
+  return text;
+}
+
+function isExactTrackSearchRequest(message) {
+  const text = normalizeSearchText(message);
+  return containsAny(text, ["单独搜索", "搜出来", "搜索出来", "找出来", "在哪里", "在哪", "没看见", "没有看见"]);
+}
+
+function isRequestedTrackMatch(track, query) {
+  const normalizedQuery = normalizeSearchText(query);
+  const title = normalizeSearchText(track?.title);
+  const cleanTitle = normalizeSongTitleForMatch(track?.title);
+  return Boolean(
+    normalizedQuery &&
+      title &&
+      (title === normalizedQuery ||
+        cleanTitle === normalizedQuery ||
+        title.includes(normalizedQuery) ||
+        normalizedQuery.includes(title) ||
+        cleanTitle.includes(normalizedQuery) ||
+        normalizedQuery.includes(cleanTitle) ||
+        getTextSimilarity(cleanTitle || title, normalizedQuery) >= 0.8),
+  );
+}
+
+function normalizeSongTitleForMatch(value) {
+  return normalizeSearchText(
+    String(value || "")
+      .replace(/\s*[\(（\[].*?[\)）\]]\s*/g, " ")
+      .replace(/\s+(?:dj|remix|伴奏|instrumental|live|cover|翻唱|版)\b.*$/i, " "),
+  );
+}
+
+function isAlternateVersionTitle(value) {
+  return /伴奏|remix|dj|instrumental|live|cover|翻唱|版/i.test(String(value || ""));
+}
+
+function getTextSimilarity(a, b) {
+  const left = Array.from(String(a || ""));
+  const right = Array.from(String(b || ""));
+  if (!left.length || !right.length) return 0;
+  const distance = getLevenshteinDistance(left, right);
+  return 1 - distance / Math.max(left.length, right.length);
+}
+
+function getLevenshteinDistance(left, right) {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+
+  return previous[right.length];
+}
+
+function extractRequestedSongCount(message) {
+  const text = String(message || "");
+  const digitMatch = text.match(/([2-5])\s*首/u);
+  if (digitMatch) return Number(digitMatch[1]);
+  if (/一两首|两首|2首/u.test(text)) return 2;
+  if (/三首|3首/u.test(text)) return 3;
+  if (/四首|4首/u.test(text)) return 4;
+  if (/五首|5首/u.test(text)) return 5;
+  if (/几首|一些|几首歌/u.test(text)) return 4;
+  return 0;
 }
 
 function buildDailySeed(scene) {
@@ -3158,6 +3643,69 @@ async function searchNcmSongs(query, limit) {
     console.warn("Netease cloudsearch failed, falling back to /search:", error.message);
     return ncmFetch("/search", params);
   }
+}
+
+async function searchNcmPlaylists(query, limit = NCM_PLAYLIST_SEARCH_LIMIT) {
+  if (!NCM_API_BASE) return [];
+
+  const params = {
+    keywords: query,
+    limit,
+    type: 1000,
+    timestamp: Date.now(),
+  };
+
+  try {
+    const data = await ncmFetch("/cloudsearch", params);
+    return (data?.result?.playlists || []).map(mapNcmPlaylist);
+  } catch (error) {
+    console.warn("Netease playlist cloudsearch failed, falling back to /search:", error.message);
+    const data = await ncmFetch("/search", params);
+    return (data?.result?.playlists || []).map(mapNcmPlaylist);
+  }
+}
+
+function rankNcmPlaylists(query, playlists) {
+  const tokens = getThemeTokens(query);
+  return (Array.isArray(playlists) ? playlists : [])
+    .map((playlist) => ({
+      playlist,
+      score: scoreNcmPlaylistMatch(playlist, tokens),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || Number(b.playlist.playCount || 0) - Number(a.playlist.playCount || 0))
+    .map((item) => item.playlist);
+}
+
+function scoreNcmPlaylistMatch(playlist, tokens) {
+  const haystack = normalizeSearchText(`${playlist?.name || ""} ${playlist?.creator || ""}`);
+  if (!haystack) return 0;
+
+  let score = 0;
+  for (const token of tokens) {
+    if (!token) continue;
+    if (haystack.includes(token)) score += token.length >= 4 ? 12 : 5;
+  }
+
+  if (/ost|op|ed|原声|主题|动漫|动画|合集|精选/i.test(String(playlist?.name || ""))) score += 8;
+  if (Number(playlist?.trackCount || 0) >= 8) score += 3;
+  if (Number(playlist?.playCount || 0) > 10000) score += 2;
+  return score;
+}
+
+function getThemeTokens(query) {
+  const raw = String(query || "");
+  const normalized = normalizeSearchText(raw);
+  const tokens = raw
+    .split(/[\s,，。！？、/|]+/)
+    .map(normalizeSearchText)
+    .filter((token) => token.length >= 2);
+
+  if (containsAny(normalized, ["进击的巨人", "進撃の巨人", "attackontitan", "shingekinokyojin", "巨人"])) {
+    tokens.push("进击的巨人", "進撃の巨人", "attackontitan", "shingekinokyojin", "巨人");
+  }
+
+  return [...new Set(tokens.map(normalizeSearchText).filter(Boolean))];
 }
 
 async function searchRecommendationMusic(query, limit = 6, options = {}) {
@@ -3699,7 +4247,39 @@ async function readState() {
 }
 
 async function writeState(state) {
-  await writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+  stateWriteQueue = stateWriteQueue.catch(() => {}).then(() => writeStateAtomic(state));
+  return stateWriteQueue;
+}
+
+async function writeStateAtomic(state) {
+  const mergedState = await mergeProtectedStateForWrite(state);
+  const payload = JSON.stringify(mergedState, null, 2);
+  const tmpFile = resolve(DATA_DIR, `state.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
+
+  if (existsSync(STATE_FILE)) {
+    await copyFile(STATE_FILE, STATE_BACKUP_FILE).catch(() => {});
+  }
+
+  await writeFile(tmpFile, payload, "utf8");
+  await rename(tmpFile, STATE_FILE);
+}
+
+async function mergeProtectedStateForWrite(nextState) {
+  if (!existsSync(STATE_FILE)) return nextState;
+
+  try {
+    const currentState = mergeState(JSON.parse(await readFile(STATE_FILE, "utf8")));
+    return {
+      ...nextState,
+      radioHistory: mergeRadioHistoryForWrite(nextState.radioHistory, currentState.radioHistory),
+    };
+  } catch {
+    return nextState;
+  }
+}
+
+function mergeRadioHistoryForWrite(nextItems, currentItems) {
+  return normalizeRadioHistory([...(nextItems || []), ...(currentItems || [])]);
 }
 
 function sendJson(res, status, payload) {
@@ -3834,10 +4414,10 @@ function normalizeConversationMessages(messages, limit = 16) {
 }
 
 function cleanAssistantHistoryText(text) {
-  return String(text || "")
+  return rewriteTastePersonaText(String(text || ""))
     .replace(/^Faye[^\n]*\n/, "")
     .replace(/^收到，我会按[^\n]*\n\n?/, "")
-    .replace(/优先从喜欢歌单选歌，并避开最近的[^\n。]*[。]?/g, "按你的喜欢歌单和相邻风格做了筛选。")
+    .replace(/优先从喜欢歌单选歌，并避开最近的[^\n。]*[。]?/g, "按我的歌库和相邻风格做了筛选。")
     .replace(/\n找到 \d+ 首可添加到队列的歌。$/g, "")
     .replace(/\n先从 .+ 开始。$/s, "")
     .trim();
@@ -3871,12 +4451,20 @@ function mergeState(raw) {
 }
 
 function normalizeRadioHistory(items) {
-  return Array.isArray(items)
-    ? items
-        .map(normalizeRadioHistoryItem)
-        .filter(Boolean)
-        .slice(0, MAX_RADIO_HISTORY)
-    : [];
+  if (!Array.isArray(items)) return [];
+
+  const seen = new Set();
+  const result = [];
+
+  for (const rawItem of items) {
+    const item = normalizeRadioHistoryItem(rawItem);
+    if (!item || seen.has(item.id)) continue;
+    seen.add(item.id);
+    result.push(item);
+    if (result.length >= MAX_RADIO_HISTORY) break;
+  }
+
+  return result;
 }
 
 function normalizeRadioHistoryItem(item) {
@@ -4132,10 +4720,10 @@ function resolveAiProvider() {
 
 function resolveTtsProvider() {
   const requested = String(process.env.TTS_PROVIDER || "").toLowerCase();
-  if (requested === "none" || requested === "off" || requested === "browser") return "browser";
+  if (requested === "none" || requested === "off" || requested === "browser") return "none";
   if (requested === "fish" && FISH_AUDIO_API_KEY && FISH_AUDIO_REFERENCE_ID) return "fish";
   if (!requested && FISH_AUDIO_API_KEY && FISH_AUDIO_REFERENCE_ID) return "fish";
-  return "browser";
+  return "none";
 }
 
 function describeAiBrain() {
