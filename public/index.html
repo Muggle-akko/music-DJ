@@ -89,6 +89,19 @@
             <span id="hostIntroTime">LYRIC</span>
             <div class="lyric-lines" id="hostIntroText">暂无歌词</div>
           </div>
+
+          <div class="host-caption-card" id="hostCaption" aria-live="polite">
+            <div class="host-avatar" aria-hidden="true">
+              <span>Faye</span>
+            </div>
+            <div class="host-caption-main">
+              <div class="host-caption-meta">
+                <span id="hostCaptionState">Faye</span>
+                <span id="hostCaptionTimer">--:--</span>
+              </div>
+              <div class="host-caption-lines" id="hostCaptionText"></div>
+            </div>
+          </div>
         </section>
 
         <section class="request-panel" aria-label="推荐与搜索">
@@ -109,7 +122,7 @@
             <div class="chat-history" id="aiChatHistory" aria-live="polite" aria-label="AI 对话记录"></div>
             <form class="chat-composer" id="aiComposer">
               <div class="chat-input-shell">
-                <textarea id="aiInput" rows="1" spellcheck="false" placeholder="告诉我你现在想听什么">今天写代码，来点电子但别太吵</textarea>
+                <textarea id="aiInput" rows="1" spellcheck="false" placeholder="告诉我你现在想听什么"></textarea>
               </div>
             </form>
           </div>

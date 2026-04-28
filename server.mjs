@@ -750,7 +750,15 @@ async function serveTtsAudio(res, pathname) {
 }
 
 function normalizeTtsText(text) {
-  return cleanHostIntroText(text).slice(0, 1200);
+  return shortenTtsPauses(cleanHostIntroText(text)).slice(0, 1200);
+}
+
+function shortenTtsPauses(text) {
+  return String(text || "")
+    .replace(/[。！？!?；;]+(?=\s*\S)/gu, "，")
+    .replace(/，{2,}/gu, "，")
+    .replace(/[。！？!?；;，,]+$/u, "")
+    .trim();
 }
 
 function createVoiceCueId(payload) {
@@ -811,9 +819,9 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
 
   await options.onStatus?.("生成 DJ 推荐计划");
 
-  const executionMode = route.replyMode === "replace_queue" || route.shouldReplaceQueue ? "playlist" : "chat";
-  const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : getRouteRecommendationLimit(route, limit);
   const plan = routeToRecommendationPlan(route, message, state, tasteContext, clientContext);
+  const executionMode = route.replyMode === "replace_queue" || route.shouldReplaceQueue || plan.strictPlaylistTheme ? "playlist" : "chat";
+  const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : getRouteRecommendationLimit(route, limit);
   await options.onStatus?.("匹配可播放歌曲");
 
   const recommendationContext = buildRecommendationFilterContext(state, tasteContext);
@@ -824,6 +832,24 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     tracks = await resolvePlaylistSearchTracks(plan, state, executionLimit, {
       recommendationContext,
     });
+  }
+
+  if (tracks.length < executionLimit && plan.strictPlaylistTheme) {
+    await options.onStatus?.("补充网易云主题歌单");
+    const extraPlaylistTracks = await resolvePlaylistSearchTracks(
+      {
+        ...plan,
+        playlistSearchQuery: plan.playlistSearchQuery || plan.search,
+      },
+      state,
+      executionLimit - tracks.length,
+      {
+        recommendationContext,
+        excludedTracks: tracks,
+        offset: tracks.length,
+      },
+    );
+    tracks = dedupeRecommendedTracks([...tracks, ...extraPlaylistTracks], recommendationContext).slice(0, executionLimit);
   }
 
   if (tracks.length < executionLimit && !plan.strictPlaylistTheme) {
@@ -2010,6 +2036,7 @@ function routeToRecommendationPlan(route, message, state, tasteContext, clientCo
   const routeQueries = route.queryHints?.length ? route.queryHints : [];
   const requestedTrackQueries = getRequestedTrackQueriesForPlan(message, route, routeQueries);
   const playlistSearchQuery = getPlaylistSearchQueryForPlan(message, routeQueries);
+  const strictPlaylistTheme = isExternalNcmPlaylistRequest(message);
   const mood = route.mood || fallback.mood;
   const keywords = [...new Set([playlistSearchQuery, ...requestedTrackQueries, ...routeQueries, ...(fallback.scene?.keywords || [])].filter(Boolean))].slice(0, 16);
   const scene = {
@@ -2026,7 +2053,7 @@ function routeToRecommendationPlan(route, message, state, tasteContext, clientCo
 
   return {
     ...fallback,
-    intent: route.intent === "playlist" ? "playlist" : "recommend",
+    intent: route.intent === "playlist" || strictPlaylistTheme ? "playlist" : "recommend",
     say: cleanVisibleDjLine(route.answer || fallback.say),
     reason: sanitizePublicRouteText(route.reason, fallback.reason),
     mood,
@@ -2036,14 +2063,14 @@ function routeToRecommendationPlan(route, message, state, tasteContext, clientCo
     scene,
     requestedTrackQueries,
     playlistSearchQuery,
-    strictPlaylistTheme: Boolean(playlistSearchQuery && route.intent === "playlist"),
+    strictPlaylistTheme,
     exactTrackOnly: requestedTrackQueries.length > 0 && isExactTrackSearchRequest(message),
   };
 }
 
 function getPlaylistSearchQueryForPlan(message, routeQueries = []) {
   const raw = String(message || "");
-  const wantsExternalPlaylist = /找|搜索|搜|重温|相关|主题|经典|曲目|ost|op|ed|原声|合集|playlist/i.test(raw);
+  const wantsExternalPlaylist = isExternalNcmPlaylistRequest(raw);
   if (!wantsExternalPlaylist) return "";
 
   const knownTheme = getKnownThemeQuery(raw);
@@ -2058,6 +2085,13 @@ function getPlaylistSearchQueryForPlan(message, routeQueries = []) {
   if (cleaned.length >= 2 && cleaned.length <= 40) return cleaned;
 
   return routeQueries.find((query) => String(query || "").trim().length >= 2) || "";
+}
+
+function isExternalNcmPlaylistRequest(message) {
+  const raw = String(message || "");
+  if (!raw.trim()) return false;
+  return /找|搜索|搜|重温|相关|主题|经典|曲目|ost|op|ed|原声|合集|playlist/i.test(raw) &&
+    /歌单|曲目|ost|op|ed|原声|主题|经典|重温|相关|合集|playlist/i.test(raw);
 }
 
 function getKnownThemeQuery(value) {
@@ -2716,33 +2750,60 @@ async function resolvePlaylistSearchTracks(plan, state, limit = PLAYLIST_RECOMME
   const query = String(plan.playlistSearchQuery || plan.search || "").trim();
   if (!query || limit <= 0 || !NCM_API_BASE) return [];
 
-  const recommendationContext = options.recommendationContext || buildRecommendationFilterContext(state);
-  const playlists = rankNcmPlaylists(query, await searchNcmPlaylists(query, NCM_PLAYLIST_SEARCH_LIMIT)).slice(0, 5);
+  const excludedTracks = Array.isArray(options.excludedTracks) ? options.excludedTracks : [];
+  const seen = new Set(excludedTracks.map(trackIdentity));
   const tracks = [];
-  const seen = new Set();
 
-  for (const playlist of playlists) {
+  for (const searchQuery of buildPlaylistSearchQueries(query)) {
     if (tracks.length >= limit) break;
 
-    const playlistTracks = await getPlaylistTracks(playlist.id, NCM_PLAYLIST_TRACK_PROBE_LIMIT, 0);
-    for (const track of playlistTracks) {
+    const playlists = rankNcmPlaylists(searchQuery, await searchNcmPlaylists(searchQuery, NCM_PLAYLIST_SEARCH_LIMIT)).slice(0, 6);
+    for (const playlist of playlists) {
       if (tracks.length >= limit) break;
-      if (!track.playable || !isReasonableRecommendationTrack(track)) continue;
-      if (shouldRejectRecommendationTrack(track, state, recommendationContext)) continue;
-      const identity = trackIdentity(track);
-      if (seen.has(identity)) continue;
-      seen.add(identity);
-      tracks.push({
-        ...track,
-        recommendSource: "playlist-search",
-        recommendQuery: query,
-        sourcePlaylistId: playlist.id,
-        sourcePlaylistName: playlist.name,
-      });
+
+      for (const offset of [0, NCM_PLAYLIST_TRACK_PROBE_LIMIT, NCM_PLAYLIST_TRACK_PROBE_LIMIT * 2]) {
+        if (tracks.length >= limit) break;
+
+        const playlistTracks = await getPlaylistTracks(playlist.id, NCM_PLAYLIST_TRACK_PROBE_LIMIT, offset);
+        for (const track of playlistTracks) {
+          if (tracks.length >= limit) break;
+          if (!track.playable || !isReasonableRecommendationTrack(track)) continue;
+          if (isDislikedCandidate(track, state)) continue;
+          const identity = trackIdentity(track);
+          if (seen.has(identity)) continue;
+          seen.add(identity);
+          tracks.push({
+            ...track,
+            recommendSource: "ncm-playlist-search",
+            recommendQuery: searchQuery,
+            sourcePlaylistId: playlist.id,
+            sourcePlaylistName: playlist.name,
+          });
+        }
+      }
     }
   }
 
-  return dedupeRecommendedTracks(tracks, recommendationContext).slice(0, limit);
+  return dedupeTracks(tracks).slice(0, limit);
+}
+
+function buildPlaylistSearchQueries(query) {
+  const values = [query];
+  const text = normalizeSearchText(query);
+
+  if (containsAny(text, ["进击的巨人", "進撃の巨人", "attackontitan", "shingekinokyojin", "巨人"])) {
+    values.push(
+      "进击的巨人",
+      "进击的巨人 OST",
+      "进击的巨人 OP ED",
+      "進撃の巨人",
+      "進撃の巨人 OST",
+      "Attack on Titan OST",
+      "Shingeki no Kyojin",
+    );
+  }
+
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 async function resolveRequestedTrackCandidates(plan, state, limit, options = {}) {

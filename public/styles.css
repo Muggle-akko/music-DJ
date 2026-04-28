@@ -160,8 +160,8 @@ button {
 
 .player-panel {
   grid-area: player;
-  height: auto;
-  min-height: 640px;
+  height: var(--side-panel-height);
+  min-height: 0;
   align-self: start;
   display: flex;
   flex-direction: column;
@@ -300,7 +300,7 @@ button {
 }
 
 .lyric-card.is-speaking {
-  border-left-color: var(--accent);
+  border-left-color: var(--success);
 }
 
 .lyric-card > span {
@@ -377,6 +377,223 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.host-caption-card {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 82px;
+  margin: 8px 0 0;
+  padding: 9px 10px;
+  border: 1px solid var(--glass-border);
+  border-left: 2px solid var(--text-disabled);
+  border-radius: 8px;
+  background: var(--glass-surface);
+  backdrop-filter: blur(14px) saturate(135%);
+  -webkit-backdrop-filter: blur(14px) saturate(135%);
+}
+
+.host-caption-card.has-intro {
+  border-left-color: var(--text-display);
+}
+
+.host-caption-card.is-preparing {
+  border-left-color: rgba(216, 196, 255, 0.68);
+}
+
+.host-caption-card.is-speaking {
+  border-left-color: #d8c4ff;
+}
+
+.host-caption-card.is-idle {
+  align-items: center;
+}
+
+.host-caption-card.is-dispersing {
+  border-left-color: rgba(255, 255, 255, 0.4);
+}
+
+.host-avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(216, 196, 255, 0.36);
+  border-radius: 50%;
+  background:
+    linear-gradient(145deg, rgba(0, 0, 0, 0.08), rgba(216, 196, 255, 0.14)),
+    url("/assets/faye-avatar.png") center / cover,
+    rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: var(--font-data);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  overflow: hidden;
+}
+
+.host-avatar::before,
+.host-avatar::after {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 1px dotted rgba(255, 255, 255, 0.32);
+  border-radius: 50%;
+}
+
+.host-avatar::after {
+  inset: 13px;
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.host-avatar span {
+  position: relative;
+  z-index: 1;
+  opacity: 0;
+}
+
+.host-caption-card.is-speaking .host-avatar {
+  border-color: #d8c4ff;
+  animation: hostAvatarScan 900ms ease-out infinite;
+}
+
+.host-caption-main {
+  min-width: 0;
+}
+
+.host-caption-card.is-idle .host-caption-main {
+  transform: translateY(2px);
+}
+
+.host-caption-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 3px;
+  color: var(--text-secondary);
+  font-family: var(--font-data);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+
+.host-caption-card.is-speaking .host-caption-meta span:first-child {
+  color: #d8c4ff;
+}
+
+.host-caption-card.is-idle .host-caption-meta {
+  display: none;
+}
+
+.host-caption-lines {
+  display: grid;
+  grid-template-rows: repeat(3, 1fr);
+  align-items: center;
+  min-height: 50px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0, #000 16%, #000 84%, rgba(0, 0, 0, 0.35) 100%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0, #000 16%, #000 84%, rgba(0, 0, 0, 0.35) 100%);
+}
+
+.host-caption-card.is-idle .host-caption-lines {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.host-caption-line {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.5;
+  overflow: hidden;
+}
+
+.host-caption-card.is-dispersing .host-caption-line {
+  animation: hostCaptionScatter 460ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.host-caption-card.is-dispersing .host-caption-line-previous {
+  animation-delay: 20ms;
+}
+
+.host-caption-card.is-dispersing .host-caption-line-current {
+  animation-delay: 55ms;
+}
+
+.host-caption-card.is-dispersing .host-caption-line-next {
+  animation-delay: 90ms;
+}
+
+.host-caption-line-previous {
+  --host-caption-opacity: 0.46;
+  transform: translateY(2px);
+}
+
+.host-caption-line-current {
+  --host-caption-opacity: 1;
+  color: var(--text-display);
+  font-size: 14px;
+  font-weight: 600;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.host-caption-line-next {
+  --host-caption-opacity: 0.42;
+  transform: translateY(-2px);
+}
+
+.host-caption-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-caption-line-current .host-caption-text {
+  color: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      #d8c4ff 0,
+      #d8c4ff var(--caption-fill, 0%),
+      var(--text-display) var(--caption-fill, 0%),
+      rgba(255, 255, 255, 0.54) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  text-shadow:
+    0 0 12px rgba(216, 196, 255, 0.28),
+    0 0 24px rgba(216, 196, 255, 0.14);
+}
+
+.host-caption-card.is-idle .host-caption-line-current {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.host-caption-card.is-idle .host-caption-line-current .host-caption-text {
+  color: rgba(255, 255, 255, 0.72);
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  text-shadow: none;
+}
+
+.host-caption-idle-text {
+  color: rgba(255, 255, 255, 0.72) !important;
+  background: none !important;
+  -webkit-background-clip: initial !important;
+  background-clip: initial !important;
+  opacity: 1;
 }
 
 .context-strip {
@@ -1030,18 +1247,29 @@ textarea:focus {
   place-items: center;
   width: 34px;
   height: 34px;
-  border: 1px solid rgba(216, 196, 255, 0.4);
+  border: 1px solid rgba(216, 196, 255, 0.36);
   border-radius: 999px;
   background:
-    radial-gradient(circle at 35% 25%, rgba(255, 255, 255, 0.34), transparent 36%),
-    rgba(216, 196, 255, 0.12);
-  color: #d8c4ff;
-  font-family: var(--font-data);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+    linear-gradient(145deg, rgba(0, 0, 0, 0.08), rgba(216, 196, 255, 0.14)),
+    url("/assets/faye-avatar.png") center / cover,
+    rgba(255, 255, 255, 0.06);
   box-shadow:
-    0 0 18px rgba(216, 196, 255, 0.18),
+    0 0 0 3px rgba(216, 196, 255, 0.035),
+    0 0 14px rgba(216, 196, 255, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.chat-avatar::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  align-self: end;
+  justify-self: end;
+  margin: 0 2px 2px 0;
+  border-radius: 999px;
+  background: #d8c4ff;
+  box-shadow: 0 0 10px rgba(216, 196, 255, 0.72);
 }
 
 .chat-meta {
@@ -1720,6 +1948,43 @@ textarea:focus {
   }
 }
 
+@keyframes hostCaptionRollIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: var(--host-caption-opacity, 1);
+    transform: translateY(0);
+  }
+}
+
+@keyframes hostCaptionScatter {
+  0% {
+    opacity: var(--host-caption-opacity, 1);
+    filter: blur(0);
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(5px);
+    transform: translate3d(18px, -8px, 0) scale(1.04);
+  }
+}
+
+@keyframes hostAvatarScan {
+  0%,
+  100% {
+    border-color: rgba(216, 196, 255, 0.36);
+  }
+
+  50% {
+    border-color: #d8c4ff;
+  }
+}
+
 @keyframes thinkingDots {
   0%,
   100% {
@@ -1750,6 +2015,11 @@ textarea:focus {
       0 0 74px rgba(var(--panel-glow-rgb), 0.1),
       inset 0 1px 0 rgba(255, 255, 255, 0.14),
       inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .host-caption-card.is-speaking .host-avatar,
+  .host-caption-line {
+    animation: none;
   }
 }
 
@@ -1834,6 +2104,22 @@ textarea:focus {
   .lyric-line {
     grid-template-columns: 38px minmax(0, 1fr);
     gap: 6px;
+  }
+
+  .host-caption-card {
+    grid-template-columns: 42px minmax(0, 1fr);
+    min-height: 80px;
+    padding: 9px 10px;
+  }
+
+  .host-avatar {
+    width: 42px;
+    height: 42px;
+    font-size: 9px;
+  }
+
+  .host-caption-line-current {
+    font-size: 14px;
   }
 
   .primary-button {

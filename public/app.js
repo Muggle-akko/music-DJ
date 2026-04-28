@@ -41,6 +41,10 @@ const progressSegments = document.querySelector("#progressSegments");
 const hostIntro = document.querySelector("#hostIntro");
 const hostIntroTime = document.querySelector("#hostIntroTime");
 const hostIntroText = document.querySelector("#hostIntroText");
+const hostCaption = document.querySelector("#hostCaption");
+const hostCaptionState = document.querySelector("#hostCaptionState");
+const hostCaptionTimer = document.querySelector("#hostCaptionTimer");
+const hostCaptionText = document.querySelector("#hostCaptionText");
 const queueList = document.querySelector("#queueList");
 const queueCount = document.querySelector("#queueCount");
 const queuePageInfo = document.querySelector("#queuePageInfo");
@@ -94,6 +98,29 @@ const VOICE_PLAYBACK_RATE = 1.2;
 const VOICE_DUCK_FADE_OUT_MS = 750;
 const VOICE_DUCK_FADE_IN_MS = 1400;
 const VOICE_SCHEDULE_MAX_DELAY_MS = 2 ** 31 - 1;
+const HOST_CAPTION_IDLE_TEXT = "等待主播解说";
+const HOST_CAPTION_IDLE_TEXTS = [
+  "主播认真听歌中",
+  "主播看稿中",
+  "主播喝咖啡中",
+  "Faye 正在校准下一句开场",
+  "Faye 正在翻唱片封面",
+  "主播把话筒推远了一点",
+  "这段先留给音乐自己说话",
+  "Faye 正在记下这一拍",
+  "主播低头看了一眼歌单",
+  "电台暂时交给旋律",
+  "Faye 正在等下一个切入点",
+  "主播在听副歌怎么落地",
+  "这首歌正在占用直播间",
+  "Faye 把灯光调暗了一格",
+  "主播暂时闭麦听歌",
+  "主播正在看评论",
+  "主播正在洗澡",
+];
+const HOST_CAPTION_MAX_LINE_CHARS = 24;
+const HOST_CAPTION_VISUAL_SLOWDOWN = 1;
+const HOST_CAPTION_DISPERSE_MS = 460;
 
 const PLAY_SVG = '<path d="M9 6l9 6-9 6V6z"/>';
 const PAUSE_SVG = '<path d="M9 6v12M15 6v12"/>';
@@ -130,6 +157,11 @@ let currentLyricTrackKey = "";
 let lyricRequestToken = 0;
 let lyricLoading = false;
 let lastLyricRenderKey = "";
+let hostCaptionLineKey = "";
+let hostCaptionLines = [];
+let lastHostCaptionRenderKey = "";
+let hostCaptionFrame = 0;
+let hostCaptionIdleTimer = 0;
 let spectrumAudioContext = null;
 let spectrumAnalyser = null;
 let spectrumData = null;
@@ -144,6 +176,7 @@ init();
 async function init() {
   voiceAudio.preload = "auto";
   renderSegments(0);
+  resetHostCaptionDisplay();
   renderAiChat();
   resizeAiInput();
   tickClock();
@@ -266,6 +299,11 @@ function bindEvents() {
     resetLyricsDisplay("暂无歌词");
     updateLikeButton();
   });
+
+  voiceAudio.addEventListener("loadedmetadata", updateHostCaptionDisplay);
+  voiceAudio.addEventListener("timeupdate", updateHostCaptionDisplay);
+  voiceAudio.addEventListener("play", startHostCaptionAnimation);
+  voiceAudio.addEventListener("ended", handleVoiceAudioEnded);
 }
 
 async function loadConfig() {
@@ -1093,7 +1131,6 @@ function renderAiChat() {
       const avatar = document.createElement("div");
       avatar.className = "chat-avatar";
       avatar.setAttribute("aria-hidden", "true");
-      avatar.textContent = "DJ";
       item.append(avatar, content);
     } else {
       item.append(content);
@@ -1229,9 +1266,11 @@ function updateLikeButton() {
 
 function updateHostIntroDisplay() {
   updateLyricsDisplay();
+  updateHostCaptionDisplay();
 }
 
 function hideHostIntro() {
+  resetHostCaptionDisplay();
   resetLyricsDisplay("暂无歌词");
 }
 
@@ -1335,6 +1374,247 @@ function renderLyricRows(rows, renderKey) {
       return row;
     }),
   );
+}
+
+function resetHostCaptionDisplay(text = getHostCaptionIdleText()) {
+  if (!hostCaption || !hostCaptionText || !hostCaptionState || !hostCaptionTimer) return;
+  clearHostCaptionIdleTimer();
+  hostCaption.classList.remove("is-speaking", "is-preparing", "is-dispersing", "has-intro");
+  hostCaption.classList.add("is-idle");
+  hostCaptionState.textContent = "Faye";
+  hostCaptionTimer.textContent = "--:--";
+  hostCaptionLineKey = "";
+  hostCaptionLines = [];
+  lastHostCaptionRenderKey = "";
+  renderHostCaptionIdleText(text);
+}
+
+function getHostCaptionIdleText() {
+  if (!HOST_CAPTION_IDLE_TEXTS.length) return HOST_CAPTION_IDLE_TEXT;
+  const index = Math.floor(Date.now() / 7000) % HOST_CAPTION_IDLE_TEXTS.length;
+  return HOST_CAPTION_IDLE_TEXTS[index];
+}
+
+function renderHostCaptionIdleText(value) {
+  const text = String(value || HOST_CAPTION_IDLE_TEXT).trim() || HOST_CAPTION_IDLE_TEXT;
+  const row = document.createElement("div");
+  row.className = "host-caption-line host-caption-line-current host-caption-line-idle";
+  row.setAttribute("aria-current", "true");
+
+  const body = document.createElement("span");
+  body.className = "host-caption-text host-caption-idle-text";
+  body.textContent = text;
+  body.style.removeProperty("--caption-fill");
+
+  row.replaceChildren(body);
+  hostCaptionText.replaceChildren(row);
+}
+
+function updateHostCaptionDisplay() {
+  if (!hostCaption || !hostCaptionText || !hostCaptionState || !hostCaptionTimer) return;
+
+  const task = activeVoiceTask;
+  if (!task || task.state === "restoring") {
+    resetHostCaptionDisplay();
+    return;
+  }
+
+  if (task.state === "dispersing" && task.disperseStartedAt && performance.now() - task.disperseStartedAt > HOST_CAPTION_DISPERSE_MS + 80) {
+    activeVoiceTask = null;
+    stopHostCaptionAnimation();
+    resetHostCaptionDisplay();
+    return;
+  }
+
+  const intro = task.intro || getHostIntro(currentTrack);
+  if (!intro?.displayText) {
+    resetHostCaptionDisplay();
+    return;
+  }
+
+  const text = String(intro.displayText || "").trim();
+  if (hostCaptionLineKey !== text) {
+    hostCaptionLineKey = text;
+    hostCaptionLines = splitHostCaptionLines(text);
+    lastHostCaptionRenderKey = "";
+  }
+
+  const state = task?.state || "queued";
+  const durationMs = getHostCaptionDurationMs(intro, task);
+  const elapsedMs = getHostCaptionElapsedMs(durationMs, state);
+  const ratio = durationMs ? Math.max(0, Math.min(1, elapsedMs / durationMs)) : 0;
+  const timing = getHostCaptionLineTiming(hostCaptionLines, ratio, state === "dispersing");
+  const activeIndex = timing.index;
+  const lineFill = timing.fill;
+
+  hostCaption.classList.add("has-intro");
+  hostCaption.classList.remove("is-idle");
+  hostCaption.classList.toggle("is-speaking", state === "speaking");
+  hostCaption.classList.toggle("is-preparing", state === "preparing" || state === "ducking");
+  hostCaption.classList.toggle("is-dispersing", state === "dispersing");
+  hostCaptionState.textContent = getHostCaptionStateLabel(state);
+  hostCaptionTimer.textContent = durationMs
+    ? `${formatTime(elapsedMs / 1000)} / ${formatTime(durationMs / 1000)}`
+    : "--:--";
+
+  renderHostCaptionRows(
+    [
+      { text: hostCaptionLines[activeIndex - 1], role: "previous", fill: 1 },
+      { text: hostCaptionLines[activeIndex], role: "current", fill: lineFill },
+      { text: hostCaptionLines[activeIndex + 1], role: "next", fill: 0 },
+    ],
+    `caption:${hostCaptionLineKey}:${activeIndex}:${state}`,
+  );
+  setHostCaptionFill(lineFill);
+}
+
+function renderHostCaptionRows(rows, renderKey) {
+  if (!hostCaptionText) return;
+  if (lastHostCaptionRenderKey !== renderKey) {
+    lastHostCaptionRenderKey = renderKey;
+    hostCaptionText.replaceChildren(
+      ...rows.map((line) => {
+        const row = document.createElement("div");
+        const role = line?.role || "current";
+        row.className = `host-caption-line host-caption-line-${role}`;
+        const text = document.createElement("span");
+        text.className = "host-caption-text";
+        text.textContent = line?.text || "";
+        text.style.setProperty("--caption-fill", `${Math.round(Math.max(0, Math.min(1, line?.fill || 0)) * 100)}%`);
+        row.replaceChildren(text);
+        if (role === "current") row.setAttribute("aria-current", "true");
+        return row;
+      }),
+    );
+  }
+}
+
+function setHostCaptionFill(fill) {
+  const currentText = hostCaptionText?.querySelector(".host-caption-line-current .host-caption-text");
+  if (!currentText) return;
+  currentText.style.setProperty("--caption-fill", `${Math.round(Math.max(0, Math.min(1, fill)) * 100)}%`);
+}
+
+function splitHostCaptionLines(text) {
+  const cleanText = String(text || "").replace(/\s+/g, " ").trim();
+  if (!cleanText) return [HOST_CAPTION_IDLE_TEXT];
+
+  const lines = [];
+  let clause = "";
+  for (const char of Array.from(cleanText)) {
+    clause += char;
+    if ("，,。.!！?？；;、".includes(char)) {
+      pushHostCaptionChunks(lines, clause);
+      clause = "";
+    }
+  }
+  pushHostCaptionChunks(lines, clause);
+  return lines.length ? lines : [cleanText];
+}
+
+function pushHostCaptionChunks(lines, value) {
+  const tokens = tokenizeHostCaptionLine(value);
+  if (!tokens.length) return;
+
+  let chunk = "";
+  for (const token of tokens) {
+    const candidate = chunk ? `${chunk}${token}` : token.trimStart();
+    if (chunk && Array.from(candidate).length > HOST_CAPTION_MAX_LINE_CHARS) {
+      lines.push(chunk.trim());
+      chunk = token.trimStart();
+    } else {
+      chunk = candidate;
+    }
+  }
+  if (chunk.trim()) lines.push(chunk.trim());
+}
+
+function tokenizeHostCaptionLine(value) {
+  return String(value || "")
+    .match(/\s*[A-Za-z0-9]+(?:[ '-][A-Za-z0-9]+)*|\s*[\u4e00-\u9fff]|\s*[^\s]/g) || [];
+}
+
+function getHostCaptionLineTiming(lines, ratio, forceEnd = false) {
+  const weights = lines.map((line) => Math.max(1, Array.from(String(line || "")).length));
+  const total = weights.reduce((sum, weight) => sum + weight, 0) || 1;
+
+  if (forceEnd) {
+    return {
+      index: Math.max(0, lines.length - 1),
+      fill: 1,
+    };
+  }
+
+  const target = Math.max(0, Math.min(1, ratio)) * total;
+  let cursor = 0;
+  for (let index = 0; index < weights.length; index += 1) {
+    const next = cursor + weights[index];
+    if (target <= next || index === weights.length - 1) {
+      return {
+        index,
+        fill: Math.max(0, Math.min(1, (target - cursor) / weights[index])),
+      };
+    }
+    cursor = next;
+  }
+
+  return { index: 0, fill: 0 };
+}
+
+function getHostCaptionDurationMs(intro, task) {
+  if (task?.state === "speaking" && Number.isFinite(voiceAudio.duration) && voiceAudio.duration > 0) {
+    return Math.round(voiceAudio.duration * 1000 * HOST_CAPTION_VISUAL_SLOWDOWN);
+  }
+  return clampMilliseconds(task?.durationMs || intro?.estimatedDurationMs, estimateClientHostIntroDurationMs(intro?.displayText), 1000, 180000);
+}
+
+function getHostCaptionElapsedMs(durationMs, state) {
+  if (state === "restoring") return durationMs;
+  if (state !== "speaking") return 0;
+  return Math.max(0, Math.min(durationMs, Math.round((Number(voiceAudio.currentTime) || 0) * 1000)));
+}
+
+function getHostCaptionStateLabel(state) {
+  return state === "speaking" ? "Faye / ON AIR" : "Faye";
+}
+
+function startHostCaptionAnimation() {
+  if (hostCaptionFrame) return;
+  const render = () => {
+    updateHostCaptionDisplay();
+    if (activeVoiceTask) {
+      hostCaptionFrame = window.requestAnimationFrame(render);
+    } else {
+      hostCaptionFrame = 0;
+    }
+  };
+  hostCaptionFrame = window.requestAnimationFrame(render);
+}
+
+function stopHostCaptionAnimation() {
+  if (!hostCaptionFrame) return;
+  window.cancelAnimationFrame(hostCaptionFrame);
+  hostCaptionFrame = 0;
+}
+
+function handleVoiceAudioEnded() {
+  if (activeVoiceTask) return;
+  resetHostCaptionDisplay();
+}
+
+function scheduleHostCaptionIdleReset(token) {
+  clearHostCaptionIdleTimer();
+  hostCaptionIdleTimer = window.setTimeout(() => {
+    if (activeVoiceTask?.token !== token || activeVoiceTask?.state !== "dispersing") return;
+    activeVoiceTask = null;
+    stopHostCaptionAnimation();
+    resetHostCaptionDisplay();
+  }, HOST_CAPTION_DISPERSE_MS + 80);
+}
+
+function clearHostCaptionIdleTimer() {
+  window.clearTimeout(hostCaptionIdleTimer);
+  hostCaptionIdleTimer = 0;
 }
 
 function parseLrc(value) {
@@ -1441,7 +1721,14 @@ function handleVisibilityChange() {
 }
 
 async function startHostIntroVoice(track, intro, cueKey, token) {
-  activeVoiceTask = { token, cueKey, state: "preparing" };
+  activeVoiceTask = {
+    token,
+    cueKey,
+    state: "preparing",
+    intro,
+    durationMs: intro.estimatedDurationMs,
+  };
+  startHostCaptionAnimation();
   updateHostIntroDisplay();
 
   const ducking = normalizeClientVoiceDucking(intro.ducking);
@@ -1451,12 +1738,24 @@ async function startHostIntroVoice(track, intro, cueKey, token) {
     if (!isCurrentVoiceToken(token)) return;
 
     const cueDucking = normalizeClientVoiceDucking(cue.ducking || ducking);
-    activeVoiceTask = { token, cueKey, state: "ducking" };
+    activeVoiceTask = {
+      token,
+      cueKey,
+      state: "ducking",
+      intro,
+      durationMs: cue.estimatedDurationMs || intro.estimatedDurationMs,
+    };
     updateHostIntroDisplay();
     await animateMusicDucking(cueDucking.targetRatio, cueDucking.fadeOutMs, token);
     if (!isCurrentVoiceToken(token)) return;
 
-    activeVoiceTask = { token, cueKey, state: "speaking" };
+    activeVoiceTask = {
+      token,
+      cueKey,
+      state: "speaking",
+      intro,
+      durationMs: cue.estimatedDurationMs || intro.estimatedDurationMs,
+    };
     setPlayState("[主播讲解]", true);
     updateHostIntroDisplay();
 
@@ -1466,13 +1765,26 @@ async function startHostIntroVoice(track, intro, cueKey, token) {
     // Voice is optional; a failed cue should never interrupt music playback.
   } finally {
     if (isCurrentVoiceToken(token)) {
-      activeVoiceTask = { token, cueKey, state: "restoring" };
+      activeVoiceTask = {
+        token,
+        cueKey,
+        state: "dispersing",
+        intro,
+        durationMs: intro.estimatedDurationMs,
+        disperseStartedAt: performance.now(),
+      };
       updateHostIntroDisplay();
-      await animateMusicDucking(1, ducking.fadeInMs, token);
+      scheduleHostCaptionIdleReset(token);
+      await delay(HOST_CAPTION_DISPERSE_MS);
       if (isCurrentVoiceToken(token)) {
         activeVoiceTask = null;
+        stopHostCaptionAnimation();
+        resetHostCaptionDisplay();
+      }
+      await animateMusicDucking(1, ducking.fadeInMs);
+      if (!activeVoiceTask) {
         refreshPlayStateForCurrent();
-        updateHostIntroDisplay();
+        resetHostCaptionDisplay();
       }
     }
   }
@@ -1488,6 +1800,7 @@ async function resolveHostIntroVoiceCue(track, intro, ducking) {
       status: intro.status || "ready",
       voiceCueId: intro.voiceCueId || "",
       speed: intro.speed || 0,
+      estimatedDurationMs: intro.estimatedDurationMs,
       ducking,
     };
   }
@@ -1516,6 +1829,7 @@ async function resolveHostIntroVoiceCue(track, intro, ducking) {
     status: cue.status || "ready",
     voiceCueId: cue.voiceCueId || intro.voiceCueId || "",
     speed: cue.speed || intro.speed || VOICE_PLAYBACK_RATE,
+    estimatedDurationMs: cue.durationMs || cue.estimatedDurationMs || intro.estimatedDurationMs,
     fallback: Boolean(cue.fallback),
     ducking: normalizeClientVoiceDucking(cue.ducking || ducking),
   };
@@ -1566,6 +1880,8 @@ async function playVoiceAudio(src, token) {
   voiceAudio.playbackRate = VOICE_PLAYBACK_RATE;
   voiceAudio.currentTime = 0;
   await voiceAudio.play();
+  startHostCaptionAnimation();
+  updateHostCaptionDisplay();
   await waitForVoiceAudio(token);
 }
 
@@ -1600,7 +1916,10 @@ function cancelVoicePipeline(options = {}) {
   voiceGeneration += 1;
   activeVoiceTask = null;
   clearHostIntroVoiceTimer();
+  clearHostCaptionIdleTimer();
   stopVoiceAudio();
+  stopHostCaptionAnimation();
+  resetHostCaptionDisplay();
 
   stopDuckingAnimation();
   if (options.immediateRestore) {
