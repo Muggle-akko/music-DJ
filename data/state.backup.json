@@ -443,9 +443,35 @@
         },
         "likedArtists": {},
         "playedArtists": {
-          "valorant": 3,
-          "grabbitz": 3,
-          "bbno": 1
+          "valorant": 24,
+          "grabbitz": 6,
+          "madge": 4,
+          "arb4": 4,
+          "odetari": 3,
+          "laybankz": 3,
+          "barnscourtney": 3,
+          "eytanpeled": 3,
+          "xg": 2,
+          "99god": 2,
+          "ericdoa": 2,
+          "林俊杰": 2,
+          "dabin": 2,
+          "bbno": 1,
+          "kissoflife": 1,
+          "段宜恩": 1,
+          "ashnikko": 1,
+          "jazzalonso": 1,
+          "emei": 1,
+          "clow": 1,
+          "kordhellmickkenny": 1,
+          "미란이mirani": 1,
+          "lilboi": 1,
+          "groovyroom": 1,
+          "eaj": 1,
+          "safaririot": 1,
+          "c103": 1,
+          "onetruegod": 1,
+          "lick": 1
         },
         "skippedArtists": {},
         "removedArtists": {},
@@ -456,7 +482,7 @@
         "likedTracks": {},
         "skippedTracks": {},
         "removedTracks": {},
-        "updatedAt": "2026-04-29T01:48:43.893Z"
+        "updatedAt": "2026-04-29T02:59:03.307Z"
       },
       "chill:late-night": {
         "scene": {
@@ -979,256 +1005,6 @@
     }
   ],
   "plays": [
-    {
-      "id": "1978611826",
-      "provider": "netease",
-      "title": "ほろよい",
-      "artist": "さんひ",
-      "album": "ほろよい",
-      "cover": "https://p3.music.126.net/l3fuhVVIWlzzlSqoE16LWQ==/109951171891584477.jpg",
-      "duration": 203700,
-      "at": "2026-04-28T10:39:18.131Z"
-    },
-    {
-      "id": "22754598",
-      "provider": "netease",
-      "title": "Are You OK",
-      "artist": "槇原敬之",
-      "album": "Home Sweet Home",
-      "cover": "https://p4.music.126.net/Rabk7MINyXS47nA4xvFgOw==/109951163705375567.jpg",
-      "duration": 236240,
-      "at": "2026-04-28T10:42:42.026Z"
-    },
-    {
-      "id": "2619645820",
-      "provider": "netease",
-      "title": "管好你自己",
-      "artist": "ChiliChill乐团",
-      "album": "混入人类计划",
-      "cover": "https://p3.music.126.net/_HtQxqke4nRbWPsA86TCUg==/109951169894151597.jpg",
-      "duration": 212163,
-      "at": "2026-04-28T10:46:38.741Z"
-    },
-    {
-      "id": "28546494",
-      "provider": "netease",
-      "title": "うたかたの恋",
-      "artist": "原田知世",
-      "album": "noon moon",
-      "cover": "https://p4.music.126.net/rtnHqdDt7h-j8nWlBkPDOQ==/5932964743711301.jpg",
-      "duration": 267040,
-      "at": "2026-04-28T10:50:11.193Z"
-    },
-    {
-      "id": "417613863",
-      "provider": "netease",
-      "title": "Dance With Me",
-      "artist": "ミカヅキ BIGWAVE",
-      "album": "Dance With Me",
-      "cover": "https://p3.music.126.net/H1qFWraY1qCXo9Oxar68CQ==/3412884100273976.jpg",
-      "duration": 254311,
-      "at": "2026-04-28T10:54:38.480Z"
-    },
-    {
-      "id": "1987385712",
-      "provider": "netease",
-      "title": "アイウエ",
-      "artist": "MAISONdes / 美波 / SAKURAmoti",
-      "album": "アイウエ",
-      "cover": "https://p3.music.126.net/T5r6pD0s4xR7XUERrVwjyA==/109951167943518527.jpg",
-      "duration": 222470,
-      "at": "2026-04-28T10:58:53.038Z"
-    },
-    {
-      "id": "2619647424",
-      "provider": "netease",
-      "title": "进击的巨人（钢琴版）",
-      "artist": "CHUNYINYUE",
-      "album": "我向岁月赊了一碗青春饭",
-      "cover": "https://p3.music.126.net/p93pxkGA1FauMPHBEySAag==/109951169829986287.jpg",
-      "duration": 153019,
-      "at": "2026-04-28T11:04:25.550Z"
-    },
-    {
-      "id": "417613863",
-      "provider": "netease",
-      "title": "Dance With Me",
-      "artist": "ミカヅキ BIGWAVE",
-      "album": "Dance With Me",
-      "cover": "https://p3.music.126.net/H1qFWraY1qCXo9Oxar68CQ==/3412884100273976.jpg",
-      "duration": 254311,
-      "at": "2026-04-28T11:05:47.006Z"
-    },
-    {
-      "id": "1987385712",
-      "provider": "netease",
-      "title": "アイウエ",
-      "artist": "MAISONdes / 美波 / SAKURAmoti",
-      "album": "アイウエ",
-      "cover": "https://p3.music.126.net/T5r6pD0s4xR7XUERrVwjyA==/109951167943518527.jpg",
-      "duration": 222470,
-      "at": "2026-04-28T11:10:01.543Z"
-    },
-    {
-      "id": "601640",
-      "provider": "netease",
-      "title": "恋人たちの地平線",
-      "artist": "菊池桃子",
-      "album": "Miroir―鏡の向こう側に―",
-      "cover": "https://p4.music.126.net/zekXAGRAhV5qTqnD1W8tcA==/109951169447779962.jpg",
-      "duration": 229533,
-      "at": "2026-04-28T11:13:44.222Z"
-    },
-    {
-      "id": "25723363",
-      "provider": "netease",
-      "title": "最終列車は25時",
-      "artist": "Lamp",
-      "album": "恋人へ",
-      "cover": "https://p3.music.126.net/zp_40v8e6xTh-5DWvL6wwg==/109951172245391924.jpg",
-      "duration": 263840,
-      "at": "2026-04-28T11:17:34.194Z"
-    },
-    {
-      "id": "2022072826",
-      "provider": "netease",
-      "title": "我想要占据你",
-      "artist": "告五人",
-      "album": "带你飞",
-      "cover": "https://p4.music.126.net/PgcIr7Vv7J4N_OjYxQbo0g==/109951168306417191.jpg",
-      "duration": 252702,
-      "at": "2026-04-28T11:21:58.580Z"
-    },
-    {
-      "id": "2000552981",
-      "provider": "netease",
-      "title": "愛じゃない",
-      "artist": "DAZBEE",
-      "album": "愛じゃない",
-      "cover": "https://p4.music.126.net/Q57SEOcaxbZzBHSOeA5P6g==/109951168081959158.jpg",
-      "duration": 135313,
-      "at": "2026-04-28T11:26:11.491Z"
-    },
-    {
-      "id": "523934",
-      "provider": "netease",
-      "title": "最後の I LOVE YOU",
-      "artist": "谷村新司",
-      "album": "君を忘れない",
-      "cover": "https://p4.music.126.net/JWhc6gGtYGVpokhqIRHS8Q==/109951168763152644.jpg",
-      "duration": 287893,
-      "at": "2026-04-28T11:28:27.165Z"
-    },
-    {
-      "id": "27615437",
-      "provider": "netease",
-      "title": "愛が止まらない",
-      "artist": "Wink",
-      "album": "青春歌年鑑 80年代総集編",
-      "cover": "https://p3.music.126.net/NP8eWsbdxl-bZwo2C4WHig==/5746047766839383.jpg",
-      "duration": 211426,
-      "at": "2026-04-28T11:33:15.381Z"
-    },
-    {
-      "id": "27615437",
-      "provider": "netease",
-      "title": "愛が止まらない",
-      "artist": "Wink",
-      "album": "青春歌年鑑 80年代総集編",
-      "cover": "https://p3.music.126.net/NP8eWsbdxl-bZwo2C4WHig==/5746047766839383.jpg",
-      "duration": 211426,
-      "at": "2026-04-28T11:34:59.486Z"
-    },
-    {
-      "id": "2619645820",
-      "provider": "netease",
-      "title": "管好你自己",
-      "artist": "ChiliChill乐团",
-      "album": "混入人类计划",
-      "cover": "https://p3.music.126.net/_HtQxqke4nRbWPsA86TCUg==/109951169894151597.jpg",
-      "duration": 212163,
-      "at": "2026-04-28T11:36:08.985Z"
-    },
-    {
-      "id": "28546494",
-      "provider": "netease",
-      "title": "うたかたの恋",
-      "artist": "原田知世",
-      "album": "noon moon",
-      "cover": "https://p4.music.126.net/rtnHqdDt7h-j8nWlBkPDOQ==/5932964743711301.jpg",
-      "duration": 267040,
-      "at": "2026-04-28T11:39:41.362Z"
-    },
-    {
-      "id": "2675025039",
-      "provider": "netease",
-      "title": "Call Of Silence（吟唱版）",
-      "artist": "柯到牙了",
-      "album": "进击的巨人OST",
-      "cover": "https://p4.music.126.net/rCWQh7lSqGdRf3QXQ7D_2A==/109951170483008626.jpg",
-      "duration": 133041,
-      "at": "2026-04-28T11:46:25.871Z"
-    },
-    {
-      "id": "2619647424",
-      "provider": "netease",
-      "title": "进击的巨人（钢琴版）",
-      "artist": "CHUNYINYUE",
-      "album": "我向岁月赊了一碗青春饭",
-      "cover": "https://p3.music.126.net/p93pxkGA1FauMPHBEySAag==/109951169829986287.jpg",
-      "duration": 153019,
-      "at": "2026-04-28T11:48:27.917Z"
-    },
-    {
-      "id": "478736273",
-      "provider": "netease",
-      "title": "紅蓮の弓矢",
-      "artist": "Linked Horizon",
-      "album": "進撃の軌跡",
-      "cover": "https://p4.music.126.net/1AqiB4a36kStvt8JvT5FIQ==/109951169451207842.jpg",
-      "duration": 310680,
-      "at": "2026-04-28T11:54:07.629Z"
-    },
-    {
-      "id": "26324043",
-      "provider": "netease",
-      "title": "美しき残酷な世界",
-      "artist": "日笠陽子",
-      "album": "美しき残酷な世界【通常盤】",
-      "cover": "https://p3.music.126.net/G8jx8FAQa8QZy3zFwVX-kw==/109951163597274620.jpg",
-      "duration": 293706,
-      "at": "2026-04-28T11:59:18.552Z"
-    },
-    {
-      "id": "26324043",
-      "provider": "netease",
-      "title": "美しき残酷な世界",
-      "artist": "日笠陽子",
-      "album": "美しき残酷な世界【通常盤】",
-      "cover": "https://p3.music.126.net/G8jx8FAQa8QZy3zFwVX-kw==/109951163597274620.jpg",
-      "duration": 293706,
-      "at": "2026-04-28T12:43:47.489Z"
-    },
-    {
-      "id": "478736273",
-      "provider": "netease",
-      "title": "紅蓮の弓矢",
-      "artist": "Linked Horizon",
-      "album": "進撃の軌跡",
-      "cover": "https://p4.music.126.net/1AqiB4a36kStvt8JvT5FIQ==/109951169451207842.jpg",
-      "duration": 310680,
-      "at": "2026-04-28T12:43:49.373Z"
-    },
-    {
-      "id": "478736273",
-      "provider": "netease",
-      "title": "紅蓮の弓矢",
-      "artist": "Linked Horizon",
-      "album": "進撃の軌跡",
-      "cover": "https://p4.music.126.net/1AqiB4a36kStvt8JvT5FIQ==/109951169451207842.jpg",
-      "duration": 310680,
-      "at": "2026-04-28T12:44:39.141Z"
-    },
     {
       "id": "478736273",
       "provider": "netease",
@@ -2178,6 +1954,256 @@
       "cover": "https://p4.music.126.net/guUwNMPmS5TJ9vq6_HAQhw==/109951171811264263.jpg",
       "duration": 205270,
       "at": "2026-04-29T01:48:43.893Z"
+    },
+    {
+      "id": "2601004802",
+      "provider": "netease",
+      "title": "SUPERPOWER",
+      "artist": "VALORANT / KISS OF LIFE / 段宜恩",
+      "album": "SUPERPOWER",
+      "cover": "https://p3.music.126.net/EINLDxlNl5gmel_C5KrnCA==/109951169810996912.jpg",
+      "duration": 182987,
+      "at": "2026-04-29T01:52:09.363Z"
+    },
+    {
+      "id": "2143288137",
+      "provider": "netease",
+      "title": "UNDEFEATED",
+      "artist": "XG / VALORANT",
+      "album": "UNDEFEATED",
+      "cover": "https://p4.music.126.net/TnzFf-RcoTk8Y_uN-ZuHlA==/109951169476362560.jpg",
+      "duration": 173105,
+      "at": "2026-04-29T01:55:12.631Z"
+    },
+    {
+      "id": "2138811507",
+      "provider": "netease",
+      "title": "2WORLDS",
+      "artist": "VALORANT / Madge",
+      "album": "2WORLDS",
+      "cover": "https://p4.music.126.net/FDFoCgSvR0qs7rl4Dkgw1g==/109951171795790208.jpg",
+      "duration": 149333,
+      "at": "2026-04-29T01:58:06.211Z"
+    },
+    {
+      "id": "2608116711",
+      "provider": "netease",
+      "title": "绝不绝",
+      "artist": "林俊杰 / VALORANT",
+      "album": "绝不绝",
+      "cover": "https://p3.music.126.net/P6Z62G77ptCTh4UR62y-0A==/109951169783570219.jpg",
+      "duration": 226000,
+      "at": "2026-04-29T02:00:35.818Z"
+    },
+    {
+      "id": "2151349465",
+      "provider": "netease",
+      "title": "Villain (Take the Shot)",
+      "artist": "VALORANT / Barns Courtney / ARB4 / Eytan Peled",
+      "album": "Villain (Take the Shot)",
+      "cover": "https://p4.music.126.net/tSRN2oN62UT0RLtS7bTuAg==/109951171811259405.jpg",
+      "duration": 189368,
+      "at": "2026-04-29T02:04:22.064Z"
+    },
+    {
+      "id": "1963056788",
+      "provider": "netease",
+      "title": "Die For You (Dabin Remix)",
+      "artist": "VALORANT / Grabbitz / Dabin",
+      "album": "Die For You (Dabin Remix)",
+      "cover": "https://p4.music.126.net/5XUAbLnqk85jBvK6X-D7lA==/109951171810217736.jpg",
+      "duration": 179000,
+      "at": "2026-04-29T02:07:31.664Z"
+    },
+    {
+      "id": "2621126579",
+      "provider": "netease",
+      "title": "Villain (Take the Shot)",
+      "artist": "VALORANT / Barns Courtney / ARB4 / Eytan Peled",
+      "album": "VALORANT Sounds Vol. 1",
+      "cover": "https://p4.music.126.net/ETVPC6PXkcNnNk9TAmlBpg==/109951169907554155.jpg",
+      "duration": 189368,
+      "at": "2026-04-29T02:10:30.911Z"
+    },
+    {
+      "id": "2079889358",
+      "provider": "netease",
+      "title": "Fire Again",
+      "artist": "VALORANT / Ashnikko",
+      "album": "Fire Again",
+      "cover": "https://p4.music.126.net/5hnjrPhxQF1KHMNjiUjmwA==/109951171796455400.jpg",
+      "duration": 206776,
+      "at": "2026-04-29T02:13:40.509Z"
+    },
+    {
+      "id": "2079867449",
+      "provider": "netease",
+      "title": "RE-IGNITION",
+      "artist": "VALORANT / ARB4 / Jazz Alonso / Emei",
+      "album": "RE-IGNITION",
+      "cover": "https://p4.music.126.net/L4bHz2W7L1bYBZHTBl_afg==/109951171810216780.jpg",
+      "duration": 204444,
+      "at": "2026-04-29T02:17:07.511Z"
+    },
+    {
+      "id": "2092268861",
+      "provider": "netease",
+      "title": "Renegade 叛逆者",
+      "artist": "99 God / VALORANT / C-Low",
+      "album": "MYTH.mix",
+      "cover": "https://p3.music.126.net/EHZFXhnZBnKkhzMqWhDFJw==/109951168993871894.jpg",
+      "duration": 162797,
+      "at": "2026-04-29T02:20:32.237Z"
+    },
+    {
+      "id": "2620006528",
+      "provider": "netease",
+      "title": "VYSE",
+      "artist": "VALORANT / Kordhell（Mick Kenny）",
+      "album": "VYSE",
+      "cover": "https://p4.music.126.net/YTzpZgvi7gbgX6Pz47mHkQ==/109951169897392369.jpg",
+      "duration": 152523,
+      "at": "2026-04-29T02:23:15.393Z"
+    },
+    {
+      "id": "2051825705",
+      "provider": "netease",
+      "title": "greater than one",
+      "artist": "VALORANT / ericdoa",
+      "album": "greater than one",
+      "cover": "https://p4.music.126.net/WhoOvtw-PWPI4mn-CQF7wA==/109951168649036016.jpg",
+      "duration": 130666,
+      "at": "2026-04-29T02:25:48.113Z"
+    },
+    {
+      "id": "1974675709",
+      "provider": "netease",
+      "title": "Can’t Slow Me Down",
+      "artist": "미란이 (MIRANI) / lIlBOI / GroovyRoom / VALORANT",
+      "album": "",
+      "cover": "https://p4.music.126.net/Nzj5NSWDZNtHZiAoZxUyUg==/109951167808611812.jpg",
+      "duration": 140904,
+      "at": "2026-04-29T02:27:58.981Z"
+    },
+    {
+      "id": "2621126582",
+      "provider": "netease",
+      "title": "UNDEFEATED",
+      "artist": "VALORANT / XG",
+      "album": "VALORANT Sounds Vol. 1",
+      "cover": "https://p4.music.126.net/ETVPC6PXkcNnNk9TAmlBpg==/109951169907554155.jpg",
+      "duration": 174409,
+      "at": "2026-04-29T02:30:20.046Z"
+    },
+    {
+      "id": "2609628694",
+      "provider": "netease",
+      "title": "RUN! (feat. Lay Bankz)",
+      "artist": "VALORANT / Odetari / Lay Bankz",
+      "album": "RUN! (feat. Lay Bankz)",
+      "cover": "https://p3.music.126.net/GaPHYYULn1Dum5OjJDnyMg==/109951169798743589.jpg",
+      "duration": 148244,
+      "at": "2026-04-29T02:33:14.659Z"
+    },
+    {
+      "id": "2013359273",
+      "provider": "netease",
+      "title": "VISIONS",
+      "artist": "eaJ / Safari Riot / VALORANT",
+      "album": "VISIONS",
+      "cover": "https://p3.music.126.net/fJzKZDLhpQo0hypemYZfEw==/109951171811262268.jpg",
+      "duration": 225142,
+      "at": "2026-04-29T02:35:43.144Z"
+    },
+    {
+      "id": "2621127330",
+      "provider": "netease",
+      "title": "RENEGADE",
+      "artist": "VALORANT / 99 God / C103",
+      "album": "VALORANT Sounds Vol. 1",
+      "cover": "https://p3.music.126.net/ETVPC6PXkcNnNk9TAmlBpg==/109951169907554155.jpg",
+      "duration": 162797,
+      "at": "2026-04-29T02:37:52.478Z"
+    },
+    {
+      "id": "2078584580",
+      "provider": "netease",
+      "title": "Savior",
+      "artist": "VALORANT / One True God",
+      "album": "Savior",
+      "cover": "https://p3.music.126.net/_WVt9QfX_oBYhwUrPgu4nQ==/109951171799836361.jpg",
+      "duration": 186250,
+      "at": "2026-04-29T02:40:35.488Z"
+    },
+    {
+      "id": "2081773478",
+      "provider": "netease",
+      "title": "Ignition",
+      "artist": "VALORANT / LICK",
+      "album": "Ignition",
+      "cover": "https://p4.music.126.net/_Vr7Hd2aAGK0ZI9MnNowrA==/109951171851593297.jpg",
+      "duration": 213333,
+      "at": "2026-04-29T02:43:42.055Z"
+    },
+    {
+      "id": "1974630461",
+      "provider": "netease",
+      "title": "Die For You",
+      "artist": "VALORANT / Grabbitz",
+      "album": "Die For You",
+      "cover": "https://p4.music.126.net/7L4ROhfRFkJxroC3zbqPqw==/109951171796456806.jpg",
+      "duration": 212926,
+      "at": "2026-04-29T02:47:15.614Z"
+    },
+    {
+      "id": "2158434963",
+      "provider": "netease",
+      "title": ">one (greater than one)",
+      "artist": "VALORANT / ericdoa",
+      "album": ">one (greater than one)",
+      "cover": "https://p4.music.126.net/GKsC5ta2OYKJ286ay1t5sQ==/109951171786526810.jpg",
+      "duration": 130666,
+      "at": "2026-04-29T02:49:28.244Z"
+    },
+    {
+      "id": "2138811507",
+      "provider": "netease",
+      "title": "2WORLDS",
+      "artist": "VALORANT / Madge",
+      "album": "2WORLDS",
+      "cover": "https://p4.music.126.net/FDFoCgSvR0qs7rl4Dkgw1g==/109951171795790208.jpg",
+      "duration": 149333,
+      "at": "2026-04-29T02:49:37.729Z"
+    },
+    {
+      "id": "2608116711",
+      "provider": "netease",
+      "title": "绝不绝",
+      "artist": "林俊杰 / VALORANT",
+      "album": "绝不绝",
+      "cover": "https://p3.music.126.net/P6Z62G77ptCTh4UR62y-0A==/109951169783570219.jpg",
+      "duration": 226000,
+      "at": "2026-04-29T02:52:07.361Z"
+    },
+    {
+      "id": "2151349465",
+      "provider": "netease",
+      "title": "Villain (Take the Shot)",
+      "artist": "VALORANT / Barns Courtney / ARB4 / Eytan Peled",
+      "album": "Villain (Take the Shot)",
+      "cover": "https://p4.music.126.net/tSRN2oN62UT0RLtS7bTuAg==/109951171811259405.jpg",
+      "duration": 189368,
+      "at": "2026-04-29T02:55:53.731Z"
+    },
+    {
+      "id": "1963056788",
+      "provider": "netease",
+      "title": "Die For You (Dabin Remix)",
+      "artist": "VALORANT / Grabbitz / Dabin",
+      "album": "Die For You (Dabin Remix)",
+      "cover": "https://p4.music.126.net/5XUAbLnqk85jBvK6X-D7lA==/109951171810217736.jpg",
+      "duration": 179000,
+      "at": "2026-04-29T02:59:03.307Z"
     }
   ],
   "queue": [
@@ -2954,8 +2980,8 @@
       }
     }
   ],
-  "queueCurrentIndex": 0,
-  "queueUpdatedAt": "2026-04-29T01:45:11.015Z",
+  "queueCurrentIndex": 6,
+  "queueUpdatedAt": "2026-04-29T02:55:53.823Z",
   "radioHistory": [
     {
       "id": "8f3caa5d09e1dc85fac5",
@@ -17535,5 +17561,5 @@
     "mood": "energy",
     "startedAt": "2026-04-29T01:37:41.089Z"
   },
-  "updatedAt": "2026-04-29T01:48:43.893Z"
+  "updatedAt": "2026-04-29T02:59:03.307Z"
 }

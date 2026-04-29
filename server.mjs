@@ -45,9 +45,18 @@ const NCM_PLAYLIST_SEARCH_LIMIT = 8;
 const NCM_PLAYLIST_TRACK_PROBE_LIMIT = 24;
 const CHAT_RECOMMENDATION_LIMIT = 5;
 const PLAYLIST_RECOMMENDATION_LIMIT = 30;
-const HOST_INTRO_COVERAGE_RATIO = 0.6;
-const HOST_INTRO_MAX_COUNT = PLAYLIST_RECOMMENDATION_LIMIT;
+const PLAYLIST_RECOMMENDATION_MIN = 15;
+const PLAYLIST_RECOMMENDATION_DEFAULT = 24;
+const STAGED_PLAYLIST_AVERAGE_TRACK_MS = 4 * 60 * 1000;
+const STAGED_PLAYLIST_MIN_STAGE_TRACKS = 2;
+const HOST_INTRO_COVERAGE_RATIO = 0.38;
+const HOST_INTRO_MAX_COUNT = 12;
 const HOST_INTRO_MIN_PLAYLIST_SIZE = 3;
+const HOST_INTRO_MAX_START_AT_MS = MAX_RECOMMENDATION_DURATION_MS - 15000;
+const HOST_INTRO_LYRIC_GAP_MIN_MS = 12000;
+const HOST_INTRO_LYRIC_EDGE_PADDING_MS = 2500;
+const HOST_INTRO_COMMENT_TRACK_LIMIT = 8;
+const HOST_INTRO_COMMENT_MAX_PER_TRACK = 3;
 
 const QUERY_MODIFIER_TERMS = new Set([
   "ai",
@@ -193,7 +202,7 @@ const DJ_INSTRUCTIONS = [
   "You are Faye, a gentle, cheerful female DJ host inside the Awudio personal web player.",
   "Return only valid JSON. No markdown, no comments.",
   "Schema:",
-  '{"intent":"recommend|playlist|music_chat|library_query","say":"Chinese DJ line under 36 chars","reason":"Chinese reason under 90 chars","mood":"focus|chill|energy|sleep|random","search":"best fallback NetEase search keyword","requestedTrackQueries":["exact song title only when listener names a specific song"],"playlistSearchQuery":"optional playlist/theme search keyword","seedQueries":[{"query":"NetEase search keyword","intent":"why this query fits","weight":1}],"queue":["keyword 1","keyword 2"],"avoid":["artist or song to avoid"],"voice":false}',
+  '{"intent":"recommend|playlist|music_chat|library_query","say":"Chinese DJ line under 36 chars","reason":"Chinese reason under 90 chars","mood":"focus|chill|energy|sleep|random","search":"best fallback NetEase search keyword","requestedTrackQueries":["exact song title only when listener names a specific song"],"playlistSearchQuery":"optional playlist/theme search keyword","seedQueries":[{"query":"NetEase search keyword","intent":"why this query fits","weight":1}],"queue":["keyword 1","keyword 2"],"avoid":["artist or song to avoid"],"voice":false,"scene":{"stages":[{"label":"coding","title":"写代码","mood":"focus","targetMinutes":30,"keywords":["focus","instrumental"]}]}}',
   "Voice: warm, bright, concise, and lightly hosted like a radio DJ. Do not be overly cute or verbose.",
   "Persona rule: the long-term listening profile is Faye's own DJ taste, distilled from the listener's library. Public copy should say my taste, my library, or my radio instinct; do not frame recommendations as the user's taste or the user's preferences.",
   "Never start with repetitive acknowledgements such as '收到', '好的', '明白', or '我会'.",
@@ -203,6 +212,8 @@ const DJ_INSTRUCTIONS = [
   "Use music_chat when the user wants to discuss a song, artist, album, style, lyric feeling, or listening impression. Do not turn that into a recommendation.",
   "Use library_query when the listener asks about the liked library or playlists behind Faye's DJ taste, such as recent additions, new releases, top artists, or which songs match a condition. Do not turn that into a recommendation.",
   "For recommend/playlist, analyze current mood/time, liked songs, liked library, recent plays, queue, disliked songs, and Faye's distilled listening profile.",
+  "If the listener describes sequential activities, preserve the order as scene.stages. Example: writing code for half an hour, then showering, then sleeping should become focus/coding first, shower/chill next, sleep last. Do not collapse it into one generic sleep or coding mood.",
+  "When scene.stages exists, seedQueries should cover the stages in order. The chat reply may mention the flow once, but do not repeat every activity in every line.",
   "For recommend/playlist, generate 6 to 10 practical NetEase Music search queries. Prefer exact song/artist pairs when known, otherwise artist + style, playlist-friendly Chinese keywords, or mood/genre terms.",
   "When the listener mixes exact songs with a broad theme, split only the explicitly named songs into requestedTrackQueries. Put artist/theme/constraint phrases in seedQueries or playlistSearchQuery instead.",
   "Example: '来一期贾斯汀比伯，我想听beauty and a beat和all around the world以及一些经典的比伯的歌，不要有重复歌曲' should use requestedTrackQueries ['Beauty And A Beat','All Around The World']; do not use '来一期贾斯汀比伯' or '一些经典的比伯的歌' as exact tracks.",
@@ -210,6 +221,8 @@ const DJ_INSTRUCTIONS = [
   "Use liked artists/songs as taste anchors, but do not expose internal filtering details or name songs you avoided.",
   "Respect disliked artists/songs and avoid blocked or overplayed tracks.",
   "When the listener asks for a playlist, explain Faye's taste direction briefly; do not list many song titles in the chat text because the UI shows the playlist separately.",
+  "For playlist replies, speak as an on-air host to the listener, not as an AI summarizing a user's requirement. Do not write phrases like 用户要求, 已生成, 结合曲库, or 右侧播放列表 in the model output.",
+  "Use the listener's scene as a light constraint, not a slogan. If the request says coding, gaming, driving, or sleeping, do not repeat that scene in every sentence.",
   "Avoid boilerplate such as 'start with these songs' unless the user explicitly asked what to play first.",
   "Prefer natural Chinese phrasing. Keep the visible reply to 1 to 3 short Chinese lines.",
   "Do not invent inaccessible private data. Keep queries short enough to work well in NetEase search.",
@@ -238,32 +251,38 @@ const HOST_INTRO_INSTRUCTIONS = [
   "You are Faye, a warm, observant radio host for Awudio.",
   "Return only valid JSON. No markdown, no comments.",
   "Schema:",
-  '{"items":[{"trackId":"exact track id from input","index":0,"startAtMs":0,"displayText":"Chinese radio host intro, 180-520 chars","tone":"comfort|context|energy|night|focus","reason":"short reason for choosing this song"}]}',
+  '{"items":[{"trackId":"exact track id from input","index":0,"startAtMs":0,"placement":"intro|interlude|outro","displayText":"Chinese radio host intro, 80-420 chars","tone":"comfort|context|energy|night|focus","reason":"short reason for choosing this song"}]}',
   "Generate host intros for at least targetCount tracks. More is acceptable when the playlist flow benefits from it.",
   "Do not simply choose the first targetCount tracks. Spread intros across the beginning, middle, and end of the playlist; use introCoverageSlots as a guide for coverage, then choose the best nearby songs.",
   "Always include the final playable track when finalPlayableIndex is present. It is the closing song and should get a farewell intro.",
   "For tracks at or after farewellStartIndex, treat the copy as the final section of the radio set: gradually close the emotional arc instead of opening new topics.",
-  "For the final playable track, explicitly say goodbye to the listener in a natural Chinese radio-host way. Tie the goodbye to currentIsoTime, clientContext.date, weather, time slot, night/morning/afternoon mood, or the user's original request when available.",
+  "For the final playable track, explicitly say goodbye to the listener in a natural Chinese radio-host way. Tie the goodbye to currentLocalTime, clientContext.date, weather, time slot, night/morning/afternoon mood, or the user's original request when available.",
   "The final goodbye should not sound like a hard stop or a customer-service signoff. Make it feel like Faye is lowering the studio lights, leaving one last thought, and letting the listener continue their day or night.",
   "Persona rule: the listening profile belongs to Faye's DJ persona. In public copy, say 我的口味, 我的歌库, 我会偏爱, 我选它, or 这套电台的审美; do not say 你的口味, 你的偏好, 你的收藏, or 你的曲库.",
   "Prefer songs that feel like good radio entry points, mood turns, familiar anchors, emotional pauses, or songs whose artist/title/album/tags give you something concrete to say.",
-  "Use the listener's current request, mood, time, weather, song title, artist, album, tags, currentIsoTime, and any known music facts already present in the input.",
+  "Use the listener's current request, mood, time, weather, song title, artist, album, tags, currentLocalTime, and any known music facts already present in the input.",
+  "Important time rule: currentLocalTime is the listener's local time. Do not infer morning, night, midnight, or goodbye timing from serverUtcIso or any UTC ISO string.",
   "If you know a widely established fact about the artist, song, album, era, style, or background, you may mention it. If you are not sure, say it as listening context or feeling instead of inventing facts.",
+  "Some tracks may include hotComments from NetEase users. Treat them only as optional listening clues. Use them when they clearly mention the song, lyrics, sound, arrangement, performance, or a concrete listening scene; ignore generic check-ins, jokes, chart comments, or comments unrelated to the track.",
+  "When using hotComments, paraphrase the useful observation naturally. Do not quote usernames, do not announce that you fetched comments, and do not let comments dominate the intro.",
   "Within the same playlist, make every intro visibly different. Before writing, assign each selected track a distinct angle such as: sonic detail, playlist transition, artist/background context, personal memory, philosophical reflection, classic film or literature association, recent public news/current cultural mood, work-life observation, city/night/weather scene, or listening technique.",
   "Do not reuse the same angle more than twice in one playlist. Avoid repeating the same opening, sentence rhythm, metaphor, emotional adjective, or advice pattern across items.",
   "For philosophical or cultural analysis, keep it conversational and tied to the song; do not become abstract filler.",
   "For classic film/literature references, use only broadly recognizable works when the association feels natural. Do not force a reference into every intro.",
   "For recent news or current events, mention only events you are confident are real or that are present in the input. If uncertain, discuss the broader current mood instead of inventing specific news details, names, dates, or numbers.",
-  "The intro will appear near the beginning of the song, so startAtMs should usually be 0.",
+  "The intro may appear at the beginning, middle interlude, or closing section of a track. Use each track's cueWindows when present; pick startAtMs inside a safe window instead of defaulting to 0.",
+  "For middle or outro cueWindows, keep the copy tighter so it can fit the instrumental space. Do not write a long monologue over a short gap.",
+  "Do not echo the listener's request in every intro. Mention scenes like coding, gaming, sleeping, or commute only when that specific song needs the context.",
   "Make the Chinese copy feel like a real radio host speaking to one listener: natural, paced, a little informative, emotionally aware, and not like an encyclopedia card.",
-  "The intro can be longer than a subtitle. It should sound speakable in 25-90 seconds when the song deserves context.",
+  "Opening intros may be 20-60 seconds when the song deserves context; interlude and outro intros should usually be 8-30 seconds and respect cueWindow maxChars.",
   "Blend three layers when possible: why this song is here, one bit of artist/song/style/background context, and what the listener can notice or feel when the music begins.",
   "If the user's request implies tiredness, stress, loneliness, or low mood, make several intros quietly comforting without becoming generic motivational copy.",
   "Avoid repeated openings such as '接下来这首', '现在让', '这首歌', '歌单走到这里', or '如果你今天'. Avoid naming sources or saying you searched.",
+  "Avoid recurring template endings and metaphors, especially '今晚，让我们', '就像是', '今天的歌就到这里', '后面的路就请你自己走', '把后面的路交给你', and similar variants.",
   "Good style sample 1: 这一段我们先不急着把情绪推高。《Song》放在这里，是因为它的鼓点和声线都有一点往前走的力量，但不会催你。Artist 的音乐常常把明亮和克制放在一起，适合在有点累的时候，把注意力慢慢从杂音里带回来。",
-  "Good style sample 2: 现在让声音稍微靠近一点。《Song》这类作品最动人的地方，不一定是副歌有多大，而是它把一个很私人的瞬间唱得很开阔。如果你今天心里有些堵，就先别急着解释，跟着前奏把呼吸放长一点。",
-  "Good style sample 3: 歌单走到这里，需要一个转场。《Song》有很清楚的年代感和画面感，像夜里路灯一盏盏往后退。你可以留意它的贝斯和节拍，音乐会先稳住脚步，再慢慢把情绪带亮。",
-  "Good final-song sample: 最后一首我想把声音留得轻一点。《Song》不是用来把今晚推向高潮的，更像把灯慢慢调暗。现在已经接近夜里，城市的噪声会慢下来一些，我也在这里和你说声晚安。把这首听完，后面的路就交给你自己慢慢走。",
+  "Good style sample 2: 声音可以稍微靠近一点。《Song》这类作品最动人的地方，不一定是副歌有多大，而是它把一个很私人的瞬间唱得很开阔。如果心里有些堵，就先别急着解释，跟着前奏把呼吸放长一点。",
+  "Good style sample 3: 这里需要一个转场。《Song》有很清楚的年代感和画面感，夜里路灯一盏盏往后退。你可以留意它的贝斯和节拍，音乐会先稳住脚步，再慢慢把情绪带亮。",
+  "Good final-song sample: 最后一首我想把声音留得轻一点。《Song》不是用来把情绪推到最高处，而是把这一段电台慢慢收稳。现在已经接近夜里，城市的噪声会慢下来一些，我也在这里把话说轻一点。等它的尾音散开，我们就在这阵安静里收场。",
 ].join("\n");
 
 await mkdir(DATA_DIR, { recursive: true });
@@ -829,7 +848,12 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     plan = await createAiBackedRecommendationPlan(message, routePlan, state, tasteContext, clientContext);
   }
   const executionMode = route.replyMode === "replace_queue" || route.shouldReplaceQueue || plan.strictPlaylistTheme ? "playlist" : "chat";
-  const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : getRouteRecommendationLimit(route, limit);
+  const executionLimit = executionMode === "playlist"
+    ? getPlaylistRecommendationLimit(message, plan)
+    : getRouteRecommendationLimit(route, limit);
+  const playlistMinimumTarget = executionMode === "playlist"
+    ? Math.min(PLAYLIST_RECOMMENDATION_MIN, executionLimit)
+    : 0;
   await options.onStatus?.("匹配可播放歌曲");
 
   const recommendationContext = buildRecommendationFilterContext(state, tasteContext);
@@ -852,7 +876,7 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     tracks = dedupeRecommendedTracks([...tracks, ...playlistTracks], recommendationContext).slice(0, executionLimit);
   }
 
-  if (tracks.length < executionLimit && plan.strictPlaylistTheme) {
+  if (tracks.length < playlistMinimumTarget && plan.strictPlaylistTheme) {
     await options.onStatus?.("补充网易云主题歌单");
     const extraPlaylistTracks = await resolvePlaylistSearchTracks(
       {
@@ -870,7 +894,11 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     tracks = dedupeRecommendedTracks([...tracks, ...extraPlaylistTracks], recommendationContext).slice(0, executionLimit);
   }
 
-  if (tracks.length < executionLimit && !plan.strictPlaylistTheme) {
+  if (
+    tracks.length < executionLimit &&
+    !plan.strictPlaylistTheme &&
+    (!plan.playlistSearchQuery || tracks.length < playlistMinimumTarget)
+  ) {
     const recommendedTracks = await resolveRecommendedTracks(plan, state, executionLimit - tracks.length, {
       tasteContext,
       clientContext,
@@ -980,6 +1008,7 @@ function buildDjReply(plan, tracks, options = {}) {
     lines.push("我没有用其他歌曲替代它。");
   } else {
     let opening = cleanVisibleDjLine(plan.say || "已整理好这轮推荐。");
+    if (isInternalRouteText(opening)) opening = mode === "playlist" ? "这期先按这个方向开场。" : "已整理好这轮推荐。";
     if (requestedStatus.missing.length && requestedStatus.mentionedInOpening) {
       opening = `我没找到《${requestedStatus.missing[0]}》，先不拿别的歌冒充。`;
     }
@@ -994,7 +1023,11 @@ function buildDjReply(plan, tracks, options = {}) {
 
   if (playableCount) {
     if (mode === "playlist") {
-      lines.push(`已生成 ${playableCount} 首可播放歌曲，并替换右侧播放列表。歌名我不在这里重复列出，你可以直接看右侧列表。`);
+      lines.push(buildPlaylistOnAirLine(playableCount, tracks));
+      const stageFlowText = summarizePlaylistStageFlow(plan);
+      if (stageFlowText) lines.push(stageFlowText);
+      const introPlacementText = summarizeHostIntroPlacements(tracks);
+      if (introPlacementText) lines.push(`讲解会散在${introPlacementText}，尽量避开人声。`);
     } else {
       lines.push(`这次先挑 ${playableCount} 首，理由也放在这里：`);
       playableTracks.slice(0, CHAT_RECOMMENDATION_LIMIT).forEach((track, index) => {
@@ -1006,6 +1039,48 @@ function buildDjReply(plan, tracks, options = {}) {
   }
 
   return lines.join("\n");
+}
+
+function buildPlaylistOnAirLine(playableCount, tracks = []) {
+  const countText = `${playableCount} 首`;
+  const hasVoice = tracks.some((track) => track.hostIntro?.displayText);
+  return hasVoice
+    ? `这期电台先排 ${countText}，歌已经接上，我会在合适的位置进来讲几句。`
+    : `这期电台先排 ${countText}，歌已经接上，直接开播。`;
+}
+
+function summarizePlaylistStageFlow(plan = {}) {
+  const stages = normalizeRecommendationStages(plan.scene?.stages);
+  if (stages.length < 2) return "";
+
+  const flow = stages
+    .map((stage) => {
+      const minutes = stage.explicitDuration && stage.targetMinutes
+        ? `${stage.targetMinutes} 分钟`
+        : "";
+      return `${minutes}${stage.title}`.trim();
+    })
+    .join(" → ");
+  const finalMood = stages.at(-1)?.mood;
+  const ending = finalMood === "sleep"
+    ? "最后把声音慢慢放下来。"
+    : finalMood === "energy"
+      ? "后段再把节奏推起来。"
+      : "后段再换到更合适的听感。";
+  return `顺序会按 ${flow} 走，前段先稳住状态，${ending}`;
+}
+
+function summarizeHostIntroPlacements(tracks = []) {
+  const placements = new Set();
+  for (const track of tracks) {
+    const startAtMs = Number(track?.hostIntro?.startAtMs) || 0;
+    if (!track?.hostIntro?.displayText) continue;
+    if (startAtMs >= 90000) placements.add("歌中段");
+    else if (startAtMs >= 20000) placements.add("间奏");
+    else placements.add("开头");
+  }
+  if (!placements.size) return "";
+  return [...placements].join("、");
 }
 
 function shouldGeneratePlaylistVoice(plan = {}, tracks = []) {
@@ -1139,7 +1214,7 @@ async function attachHostIntrosToPlaylistTracks(tracks, context = {}) {
 
 function getHostIntroTargetCount(playableCount) {
   if (playableCount < HOST_INTRO_MIN_PLAYLIST_SIZE) return 0;
-  return Math.min(HOST_INTRO_MAX_COUNT, Math.max(Math.ceil(playableCount / 2), Math.ceil(playableCount * HOST_INTRO_COVERAGE_RATIO)));
+  return Math.min(HOST_INTRO_MAX_COUNT, Math.max(3, Math.ceil(playableCount * HOST_INTRO_COVERAGE_RATIO)));
 }
 
 function getHostIntroCoverageSlots(trackCount, targetCount) {
@@ -1154,19 +1229,34 @@ function getHostIntroCoverageSlots(trackCount, targetCount) {
 
 async function createAiHostIntroItems(tracks, context, targetCount) {
   const finalPlayableIndex = getFinalPlayableTrackIndex(tracks);
+  const [cueWindowMap, commentMap] = await Promise.all([
+    buildHostIntroCueWindowMap(tracks),
+    buildHostIntroCommentMap(tracks, targetCount),
+  ]);
   const payload = {
     request: context.message || "",
     mood: context.plan?.mood || "random",
     playlistReason: context.plan?.reason || "",
     scene: context.plan?.scene || {},
     clientContext: context.clientContext || {},
-    currentIsoTime: new Date().toISOString(),
+    currentLocalTime: buildCurrentLocalTimeContext(context.clientContext),
+    serverUtcIso: new Date().toISOString(),
     targetCount,
     trackCount: tracks.length,
     finalPlayableIndex,
     farewellStartIndex: finalPlayableIndex >= 0 ? Math.max(0, finalPlayableIndex - 2) : -1,
     introCoverageSlots: getHostIntroCoverageSlots(tracks.length, targetCount),
-    tracks: tracks.map(compactHostIntroTrack).slice(0, PLAYLIST_RECOMMENDATION_LIMIT),
+    tracks: tracks
+      .map((track, index) => {
+        const key = getHostIntroTrackKey(track, index);
+        return compactHostIntroTrack(
+          track,
+          index,
+          cueWindowMap.get(key) || [],
+          commentMap.get(key) || [],
+        );
+      })
+      .slice(0, PLAYLIST_RECOMMENDATION_LIMIT),
   };
 
   if (AI_PROVIDER === "deepseek") return createDeepSeekHostIntroItems(payload);
@@ -1179,6 +1269,262 @@ function getFinalPlayableTrackIndex(tracks = []) {
     if (tracks[index]?.playable && tracks[index]?.url) return index;
   }
   return -1;
+}
+
+async function buildHostIntroCueWindowMap(tracks = []) {
+  const result = new Map();
+  const jobs = tracks
+    .map((track, index) => ({ track, index }))
+    .filter(({ track }) => track?.playable && track?.url && track?.id && track.provider !== "demo");
+
+  for (const batch of chunkArray(jobs, 4)) {
+    const settled = await Promise.allSettled(
+      batch.map(async ({ track, index }) => ({
+        key: getHostIntroTrackKey(track, index),
+        windows: buildHostIntroCueWindows(await getLyric(track.id), track.duration),
+      })),
+    );
+
+    for (const item of settled) {
+      if (item.status !== "fulfilled" || !item.value?.windows?.length) continue;
+      result.set(item.value.key, item.value.windows);
+    }
+  }
+
+  return result;
+}
+
+function getHostIntroTrackKey(track, index) {
+  return `${String(track?.id || "")}:${index}`;
+}
+
+function buildHostIntroCueWindows(lyric, durationMs) {
+  const lyricLines = parseLrcTimestamps(lyric);
+  const duration = normalizeNumber(durationMs);
+  const windows = [];
+
+  const firstLineAt = lyricLines[0]?.timeMs;
+  if (Number.isFinite(firstLineAt) && firstLineAt >= HOST_INTRO_LYRIC_GAP_MIN_MS) {
+    windows.push(createHostIntroCueWindow("intro", 0, firstLineAt - HOST_INTRO_LYRIC_EDGE_PADDING_MS, 8));
+  } else {
+    windows.push(createHostIntroCueWindow("intro", 0, Math.min(18000, duration || 18000), 2));
+  }
+
+  for (let index = 0; index < lyricLines.length - 1; index += 1) {
+    const previous = lyricLines[index];
+    const next = lyricLines[index + 1];
+    const gap = next.timeMs - previous.timeMs;
+    if (gap < HOST_INTRO_LYRIC_GAP_MIN_MS) continue;
+
+    const startAtMs = previous.timeMs + HOST_INTRO_LYRIC_EDGE_PADDING_MS;
+    const safeUntilMs = next.timeMs - HOST_INTRO_LYRIC_EDGE_PADDING_MS;
+    if (startAtMs < 20000 || safeUntilMs <= startAtMs) continue;
+    windows.push(createHostIntroCueWindow("interlude", startAtMs, safeUntilMs, gap));
+  }
+
+  const lastLineAt = lyricLines.at(-1)?.timeMs;
+  if (duration && Number.isFinite(lastLineAt) && duration - lastLineAt >= HOST_INTRO_LYRIC_GAP_MIN_MS) {
+    windows.push(createHostIntroCueWindow("outro", lastLineAt + HOST_INTRO_LYRIC_EDGE_PADDING_MS, duration - 3000, duration - lastLineAt));
+  }
+
+  return windows
+    .filter((window) => window && window.safeUntilMs - window.startAtMs >= 5000)
+    .sort((a, b) => b.score - a.score || a.startAtMs - b.startAtMs)
+    .slice(0, 4)
+    .map(({ score, ...window }) => window);
+}
+
+function createHostIntroCueWindow(placement, startAtMs, safeUntilMs, score) {
+  const start = clampMs(startAtMs, 0, 0, HOST_INTRO_MAX_START_AT_MS);
+  const end = Math.max(start + 5000, clampMs(safeUntilMs, start + 5000, start + 5000, MAX_RECOMMENDATION_DURATION_MS));
+  const gapMs = Math.max(0, end - start);
+  return {
+    placement,
+    startAtMs: start,
+    safeUntilMs: end,
+    gapMs,
+    maxChars: placement === "intro" ? 260 : Math.max(70, Math.min(220, Math.floor(gapMs / 180))),
+    score,
+  };
+}
+
+function parseLrcTimestamps(value) {
+  const lines = [];
+  String(value || "")
+    .split(/\r?\n/)
+    .forEach((line) => {
+      const text = line.replace(/\[[0-9:.]+\]/g, "").trim();
+      const matches = [...line.matchAll(/\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]/g)];
+      if (!text || !matches.length) return;
+      for (const match of matches) {
+        const minutes = Number(match[1]) || 0;
+        const seconds = Number(match[2]) || 0;
+        const fraction = String(match[3] || "0").padEnd(3, "0").slice(0, 3);
+        lines.push({
+          timeMs: minutes * 60000 + seconds * 1000 + (Number(fraction) || 0),
+        });
+      }
+    });
+
+  return lines.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+async function buildHostIntroCommentMap(tracks = [], targetCount = 0) {
+  const result = new Map();
+  if (!NCM_API_BASE) return result;
+
+  const jobs = selectHostIntroCommentJobs(tracks, targetCount);
+  for (const batch of chunkArray(jobs, 2)) {
+    const settled = await Promise.allSettled(
+      batch.map(async ({ track, index }) => ({
+        key: getHostIntroTrackKey(track, index),
+        comments: await getRelevantSongHotComments(track),
+      })),
+    );
+
+    for (const item of settled) {
+      if (item.status !== "fulfilled" || !item.value?.comments?.length) continue;
+      result.set(item.value.key, item.value.comments);
+    }
+  }
+
+  return result;
+}
+
+function selectHostIntroCommentJobs(tracks = [], targetCount = 0) {
+  const entries = tracks
+    .map((track, index) => ({ track, index }))
+    .filter(({ track }) => track?.playable && track?.url && track?.id && track.provider !== "demo");
+  if (!entries.length) return [];
+
+  const desired = Math.min(
+    HOST_INTRO_COMMENT_TRACK_LIMIT,
+    Math.max(3, Number(targetCount) || 0),
+  );
+  const slots = getHostIntroCoverageSlots(tracks.length, desired);
+  const finalPlayableIndex = getFinalPlayableTrackIndex(tracks);
+
+  return entries
+    .map((entry) => ({
+      ...entry,
+      score: Math.min(...slots.map((slot) => Math.abs(slot - entry.index))) +
+        (entry.index === finalPlayableIndex ? -0.5 : 0),
+    }))
+    .sort((a, b) => a.score - b.score || a.index - b.index)
+    .slice(0, desired)
+    .map(({ score, ...entry }) => entry);
+}
+
+async function getRelevantSongHotComments(track) {
+  if (!track?.id || !NCM_API_BASE) return [];
+
+  try {
+    const data = await ncmFetch("/comment/music", {
+      id: track.id,
+      limit: 20,
+      timestamp: Date.now(),
+    });
+    const comments = [
+      ...(Array.isArray(data?.hotComments) ? data.hotComments : []),
+      ...(Array.isArray(data?.comments) ? data.comments : []),
+    ]
+      .map(normalizeNcmSongComment)
+      .filter(Boolean);
+
+    return comments
+      .map((comment) => ({
+        ...comment,
+        score: scoreSongCommentRelevance(track, comment),
+      }))
+      .filter((comment) => comment.score > 0)
+      .sort((a, b) => b.score - a.score || b.likedCount - a.likedCount)
+      .slice(0, HOST_INTRO_COMMENT_MAX_PER_TRACK)
+      .map(({ score, ...comment }) => comment);
+  } catch (error) {
+    console.warn("Netease hot comments failed:", error.message);
+    return [];
+  }
+}
+
+function normalizeNcmSongComment(comment) {
+  const text = cleanSongCommentText(comment?.content || "");
+  if (!text) return null;
+  return {
+    text,
+    likedCount: normalizeNumber(comment?.likedCount),
+  };
+}
+
+function cleanSongCommentText(value) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/@\S+/g, "")
+    .trim()
+    .slice(0, 120);
+}
+
+function scoreSongCommentRelevance(track, comment) {
+  const raw = String(comment?.text || "");
+  const text = normalizeSearchText(raw);
+  if (text.length < 8 || isLowSignalSongComment(raw)) return 0;
+
+  const title = normalizeSearchText(track?.title);
+  const album = normalizeSearchText(track?.album);
+  const artists = splitArtistNames(track?.artist).map(normalizeSearchText).filter(Boolean);
+  const tags = (Array.isArray(track?.tags) ? track.tags : []).map(normalizeSearchText).filter(Boolean);
+  const hasMusicSignal = containsAny(text, [
+    "歌词",
+    "前奏",
+    "副歌",
+    "编曲",
+    "旋律",
+    "节奏",
+    "鼓点",
+    "贝斯",
+    "吉他",
+    "钢琴",
+    "人声",
+    "唱腔",
+    "和声",
+    "采样",
+    "现场",
+    "remix",
+    "live",
+    "cover",
+  ]);
+  let score = 0;
+
+  if (title && title.length >= 2 && text.includes(title)) score += 18;
+  if (album && album.length >= 4 && text.includes(album)) score += 8;
+  if (artists.some((artist) => artist.length >= 2 && text.includes(artist))) score += 12;
+  if (tags.some((tag) => tag.length >= 2 && text.includes(tag))) score += 8;
+  if (hasMusicSignal) score += 18;
+  if (raw.length >= 14 && raw.length <= 100) score += 4;
+  score += Math.min(10, Math.log1p(comment?.likedCount || 0) * 1.5);
+
+  return hasMusicSignal || score >= 24 ? score : 0;
+}
+
+function isLowSignalSongComment(value) {
+  const raw = String(value || "").replace(/\s+/g, "");
+  if (/^(第一|前排|打卡|签到|路过|来过|报到|考古|999\+?)$/u.test(raw)) return true;
+  const text = normalizeSearchText(value);
+  return containsAny(text, [
+    "打卡",
+    "签到",
+    "前排",
+    "求赞",
+    "求热评",
+    "日推",
+    "每日推荐",
+    "私人fm",
+    "网易云",
+    "路过",
+    "来过",
+    "报到",
+    "考古",
+    "999",
+  ]);
 }
 
 async function createDeepSeekHostIntroItems(payload) {
@@ -1196,7 +1542,7 @@ async function createDeepSeekHostIntroItems(payload) {
       ],
       response_format: { type: "json_object" },
       thinking: { type: "disabled" },
-      temperature: 0.55,
+      temperature: 0.72,
       max_tokens: 6000,
       stream: false,
     }),
@@ -1220,6 +1566,7 @@ async function createOpenAiHostIntroItems(payload) {
       model: OPENAI_MODEL,
       instructions: HOST_INTRO_INSTRUCTIONS,
       input: JSON.stringify(payload),
+      temperature: 0.7,
       max_output_tokens: 6000,
       store: false,
     }),
@@ -1231,7 +1578,7 @@ async function createOpenAiHostIntroItems(payload) {
   return JSON.parse(extractJsonObject(extractResponseText(data)))?.items || [];
 }
 
-function compactHostIntroTrack(track, index) {
+function compactHostIntroTrack(track, index, cueWindows = [], hotComments = []) {
   return {
     index,
     id: String(track.id || ""),
@@ -1242,6 +1589,9 @@ function compactHostIntroTrack(track, index) {
     tags: Array.isArray(track.tags) ? track.tags.slice(0, 8).map(String) : [],
     recommendSource: String(track.recommendSource || track.recommendQuery || ""),
     playable: Boolean(track.playable && track.url),
+    cueWindows: Array.isArray(cueWindows) ? cueWindows.slice(0, 4) : [],
+    hotComments: Array.isArray(hotComments) ? hotComments.slice(0, HOST_INTRO_COMMENT_MAX_PER_TRACK) : [],
+    playlistStage: compactRecommendationStage(track.playlistStage, track.playlistStage?.index || index),
   };
 }
 
@@ -1268,9 +1618,11 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
 
     let displayText = cleanHostIntroText(item.displayText || item.text || item.intro);
     if (!displayText) continue;
+    if (hasBannedHostIntroTemplate(displayText)) continue;
     if (isHostIntroTooSimilar(displayText, usedIntroTexts)) continue;
     if (!displayText) continue;
 
+    const startAtMs = resolveHostIntroStartAtMs(item, match.track);
     selected.add(match.index);
     usedIntroTexts.push(displayText);
     result[match.index] = {
@@ -1279,10 +1631,10 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
         enabled: true,
         voiceCueId: createVoiceCueId({
           trackId: match.track.id || match.index,
-          startAtMs: clampMs(item.startAtMs, 0, 0, 60000),
+          startAtMs,
           text: displayText,
         }),
-        startAtMs: clampMs(item.startAtMs, 0, 0, 60000),
+        startAtMs,
         estimatedDurationMs: clampMs(
           item.estimatedDurationMs,
           estimateHostIntroDurationMs(displayText),
@@ -1299,12 +1651,22 @@ function applyHostIntroItems(tracks, items, targetCount, context = {}) {
         },
         tone: String(item.tone || "context").slice(0, 32),
         moodIntent: String(context.plan?.mood || item.moodIntent || "random").slice(0, 32),
+        placement: String(item.placement || item.moment || "").slice(0, 32),
         source: normalizeHostIntroSource(item),
       },
     };
   }
 
   return result;
+}
+
+function resolveHostIntroStartAtMs(item = {}, track = {}) {
+  const duration = normalizeNumber(track.duration);
+  const maxStartAtMs = duration
+    ? Math.max(0, Math.min(HOST_INTRO_MAX_START_AT_MS, duration - 3000))
+    : HOST_INTRO_MAX_START_AT_MS;
+  const rawStartAtMs = item.startAtMs ?? item.startMs ?? item.timeMs ?? item.start;
+  return clampMs(rawStartAtMs, 0, 0, maxStartAtMs);
 }
 
 async function attachVoiceCuesToHostIntros(tracks) {
@@ -1368,6 +1730,10 @@ function normalizeHostIntroItems(items) {
 function normalizeHostIntroSource(item = {}) {
   if (item.source) return String(item.source).slice(0, 40);
   return AI_PROVIDER === "local" ? "none" : AI_PROVIDER;
+}
+
+function hasBannedHostIntroTemplate(text) {
+  return /今晚[，,]?\s*让我们|就像是|今天的歌就到这里|后面的路.*(?:自己|你)|把后面的路交给你/u.test(String(text || ""));
 }
 
 function isHostIntroTooSimilar(text, existingTexts = []) {
@@ -1868,7 +2234,8 @@ async function createDeepSeekIntentRoute(message, tasteContext, clientContext = 
             request: message,
             context: buildCompactRoutingContext(tasteContext),
             clientContext,
-            now: new Date().toISOString(),
+            now: buildCurrentLocalTimeContext(clientContext),
+            serverUtcIso: new Date().toISOString(),
           }),
         },
       ],
@@ -1901,7 +2268,8 @@ async function createOpenAiIntentRoute(message, tasteContext, clientContext = {}
         request: message,
         context: buildCompactRoutingContext(tasteContext),
         clientContext,
-        now: new Date().toISOString(),
+        now: buildCurrentLocalTimeContext(clientContext),
+        serverUtcIso: new Date().toISOString(),
       }),
       max_output_tokens: 450,
       store: false,
@@ -2025,6 +2393,7 @@ function isInternalRouteText(value) {
   const text = String(value || "").trim();
   if (!text) return false;
   if (!/[\u3400-\u9fff]/u.test(text)) return true;
+  if (/用户|结合曲库|已生成|可播放歌曲|右侧播放列表|播放列表|替换右侧|AI\s*推荐|生成歌单/u.test(text)) return true;
   return /\b(route|intent|explicit|button|fallback|chat[-_ ]?only|recommendation request|playlist request)\b/i.test(text);
 }
 
@@ -2038,6 +2407,24 @@ function getRouteRecommendationLimit(route, fallbackLimit) {
   const requested = normalizeRouteRecommendationCount(route?.recommendationCount);
   if (requested) return requested;
   return Math.max(1, Math.min(CHAT_RECOMMENDATION_LIMIT, Number(fallbackLimit) || CHAT_RECOMMENDATION_LIMIT));
+}
+
+function getPlaylistRecommendationLimit(message, plan = {}) {
+  const requested = extractRequestedSongCount(message);
+  if (requested) return clampPlaylistRecommendationCount(requested);
+
+  const queryCount = Array.isArray(plan.seedQueries)
+    ? plan.seedQueries.filter((item) => item?.query || typeof item === "string").length
+    : 0;
+  if (plan.strictPlaylistTheme) return queryCount <= 2 ? 20 : PLAYLIST_RECOMMENDATION_DEFAULT;
+  if (plan.playlistSearchQuery) return PLAYLIST_RECOMMENDATION_DEFAULT;
+  return PLAYLIST_RECOMMENDATION_DEFAULT;
+}
+
+function clampPlaylistRecommendationCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return PLAYLIST_RECOMMENDATION_DEFAULT;
+  return Math.max(PLAYLIST_RECOMMENDATION_MIN, Math.min(PLAYLIST_RECOMMENDATION_LIMIT, Math.floor(number)));
 }
 
 function normalizeConfidence(value) {
@@ -2147,6 +2534,16 @@ function mergeAiRecommendationPlan(routePlan, aiPlan = {}, message) {
     ...finalSeedQueries.map((item) => item.query),
     ...(routePlan.scene?.keywords || []).filter(isUsableRecommendationQuery),
   ];
+  const aiScene = aiPlan.scene && typeof aiPlan.scene === "object" ? aiPlan.scene : {};
+  const mergedScene = {
+    ...routePlan.scene,
+    ...aiScene,
+    mood,
+    keywords: [...new Set(sceneKeywords.map(cleanRecommendationSearchQuery).filter(Boolean))].slice(0, 16),
+  };
+  mergedScene.stages = normalizeRecommendationStages(
+    Array.isArray(aiScene.stages) && aiScene.stages.length ? aiScene.stages : routePlan.scene?.stages,
+  );
 
   return {
     ...routePlan,
@@ -2161,12 +2558,7 @@ function mergeAiRecommendationPlan(routePlan, aiPlan = {}, message) {
     requestedTrackQueries,
     playlistSearchQuery,
     exactTrackOnly: requestedTrackQueries.length > 0 && (routePlan.exactTrackOnly || Boolean(aiPlan.exactTrackOnly)),
-    scene: {
-      ...routePlan.scene,
-      ...(aiPlan.scene && typeof aiPlan.scene === "object" ? aiPlan.scene : {}),
-      mood,
-      keywords: [...new Set(sceneKeywords.map(cleanRecommendationSearchQuery).filter(Boolean))].slice(0, 16),
-    },
+    scene: mergedScene,
   };
 }
 
@@ -2269,7 +2661,7 @@ async function createRoutedChatResponse(message, state, tasteContext, route) {
 async function createDjPlan(message, state, tasteContext, clientContext = {}) {
   if (AI_PROVIDER === "deepseek") {
     try {
-      return normalizePlan(await createDeepSeekPlan(message, tasteContext), message, clientContext);
+      return normalizePlan(await createDeepSeekPlan(message, tasteContext, clientContext), message, clientContext);
     } catch (error) {
       console.warn("DeepSeek plan failed, falling back to local profile plan:", error.message);
     }
@@ -2277,7 +2669,7 @@ async function createDjPlan(message, state, tasteContext, clientContext = {}) {
 
   if (AI_PROVIDER === "openai") {
     try {
-      return normalizePlan(await createOpenAiPlan(message, tasteContext), message, clientContext);
+      return normalizePlan(await createOpenAiPlan(message, tasteContext, clientContext), message, clientContext);
     } catch (error) {
       console.warn("OpenAI plan failed, falling back to local profile plan:", error.message);
     }
@@ -2286,7 +2678,7 @@ async function createDjPlan(message, state, tasteContext, clientContext = {}) {
   return createProfilePlan(message, state, tasteContext, clientContext);
 }
 
-async function createDeepSeekPlan(message, tasteContext) {
+async function createDeepSeekPlan(message, tasteContext, clientContext = {}) {
   const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
@@ -2302,7 +2694,8 @@ async function createDeepSeekPlan(message, tasteContext) {
           content: JSON.stringify({
             request: message,
             tasteContext,
-            now: new Date().toISOString(),
+            now: buildCurrentLocalTimeContext(clientContext),
+            serverUtcIso: new Date().toISOString(),
           }),
         },
       ],
@@ -2324,7 +2717,7 @@ async function createDeepSeekPlan(message, tasteContext) {
   return JSON.parse(extractJsonObject(text));
 }
 
-async function createOpenAiPlan(message, tasteContext) {
+async function createOpenAiPlan(message, tasteContext, clientContext = {}) {
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -2337,7 +2730,8 @@ async function createOpenAiPlan(message, tasteContext) {
       input: JSON.stringify({
         request: message,
         tasteContext,
-        now: new Date().toISOString(),
+        now: buildCurrentLocalTimeContext(clientContext),
+        serverUtcIso: new Date().toISOString(),
       }),
       max_output_tokens: 700,
       store: false,
@@ -2828,6 +3222,7 @@ async function buildTasteContext(state, conversation = [], clientContext = {}) {
 
 async function resolveRecommendedTracks(plan, state, limit = CHAT_RECOMMENDATION_LIMIT, options = {}) {
   const recommendationContext = buildRecommendationFilterContext(state, options.tasteContext);
+  const stagedPlaylist = options.mode === "playlist" && hasPlaylistStagePlan(plan);
   const requestedTracks = options.skipRequestedTracks
     ? []
     : await resolveRequestedTrackCandidates(plan, state, Math.min(limit, CHAT_RECOMMENDATION_LIMIT), {
@@ -2849,13 +3244,21 @@ async function resolveRecommendedTracks(plan, state, limit = CHAT_RECOMMENDATION
     return dedupeRecommendedTracks([...requestedTracks, ...profileTracks], recommendationContext).slice(0, limit);
   }
 
-  const fallbackTracks = await resolveSearchRecommendedTracks(plan, state, remainingLimit - profileTracks.length, {
+  if (stagedPlaylist && profileTracks.length >= PLAYLIST_RECOMMENDATION_MIN) {
+    return dedupeRecommendedTracks([...requestedTracks, ...profileTracks], recommendationContext).slice(0, limit);
+  }
+
+  const fallbackLimit = stagedPlaylist
+    ? Math.max(0, PLAYLIST_RECOMMENDATION_MIN - requestedTracks.length - profileTracks.length)
+    : remainingLimit - profileTracks.length;
+  const fallbackTracks = await resolveSearchRecommendedTracks(plan, state, fallbackLimit, {
     ...options,
     recommendationContext,
   });
   const merged = dedupeRecommendedTracks(weaveTrackGroups(profileTracks, fallbackTracks, limit), recommendationContext);
 
-  return dedupeRecommendedTracks([...requestedTracks, ...merged], recommendationContext).slice(0, limit);
+  return dedupeRecommendedTracks([...requestedTracks, ...merged], recommendationContext)
+    .slice(0, stagedPlaylist ? Math.min(limit, PLAYLIST_RECOMMENDATION_MIN) : limit);
 }
 
 async function resolvePlaylistSearchTracks(plan, state, limit = PLAYLIST_RECOMMENDATION_LIMIT, options = {}) {
@@ -2864,6 +3267,7 @@ async function resolvePlaylistSearchTracks(plan, state, limit = PLAYLIST_RECOMME
 
   const excludedTracks = Array.isArray(options.excludedTracks) ? options.excludedTracks : [];
   const seen = new Set(excludedTracks.map(trackIdentity));
+  const seenCanonicalSongs = new Set(excludedTracks.map(trackCanonicalSongIdentity).filter(Boolean));
   const tracks = [];
 
   for (const searchQuery of buildPlaylistSearchQueries(query)) {
@@ -2882,8 +3286,12 @@ async function resolvePlaylistSearchTracks(plan, state, limit = PLAYLIST_RECOMME
           if (!track.playable || !isReasonableRecommendationTrack(track)) continue;
           if (isDislikedCandidate(track, state)) continue;
           const identity = trackIdentity(track);
+          const canonicalSong = trackCanonicalSongIdentity(track);
           if (seen.has(identity)) continue;
+          if (canonicalSong && seenCanonicalSongs.has(canonicalSong)) continue;
+          if (hasAlternateVersionDuplicate(tracks, track)) continue;
           seen.add(identity);
+          if (canonicalSong) seenCanonicalSongs.add(canonicalSong);
           tracks.push({
             ...track,
             recommendSource: "ncm-playlist-search",
@@ -2995,6 +3403,21 @@ async function resolveProfileRecommendedTracks(plan, state, limit, options = {})
   const likedIds = new Set(profileSongs.map((song) => String(song.id)).filter(Boolean));
   const similarTarget = limit >= 3 ? Math.max(1, Math.floor(limit * (1 - PROFILE_RECOMMENDATION_LIKED_RATIO))) : 0;
   const likedTarget = Math.max(1, limit - similarTarget);
+
+  if (options.mode === "playlist" && hasPlaylistStagePlan(plan)) {
+    return resolveStagedProfileRecommendedTracks(profileSongs, {
+      scene,
+      plan,
+      state,
+      limit,
+      recommendationContext,
+      recentIds,
+      currentQueueIds,
+      recentRadioIds,
+      runSalt: getRadioHistorySalt(state),
+    });
+  }
+
   const rankedSongs = rankProfileSongs(profileSongs, {
     scene,
     plan,
@@ -3056,6 +3479,160 @@ function rankProfileSongs(songs, context) {
     }))
     .sort((a, b) => b.score - a.score)
     .map(({ song }) => song);
+}
+
+async function resolveStagedProfileRecommendedTracks(profileSongs, context) {
+  const stages = normalizeRecommendationStages(context.scene?.stages);
+  if (stages.length < 2) return [];
+
+  const allocations = allocateStageTrackCounts(stages, context.limit);
+  const selectedIds = new Set();
+  let tracks = [];
+
+  for (const allocation of allocations) {
+    if (tracks.length >= context.limit) break;
+    const count = Math.min(allocation.count, context.limit - tracks.length);
+    if (count <= 0) continue;
+
+    const stageScene = createSceneForPlaylistStage(context.scene, allocation.stage);
+    const stagePlan = {
+      ...context.plan,
+      mood: allocation.stage.mood,
+      search: allocation.stage.keywords[0] || allocation.stage.title || context.plan.search,
+      scene: stageScene,
+    };
+    const rankedSongs = rankProfileSongs(profileSongs, {
+      scene: stageScene,
+      plan: stagePlan,
+      state: context.state,
+      recentIds: context.recentIds,
+      currentQueueIds: context.currentQueueIds,
+      recentRadioIds: context.recentRadioIds,
+      runSalt: `${context.runSalt || ""}:${allocation.stage.label}:${allocation.index}`,
+    }).filter((song) => !selectedIds.has(String(song.id)));
+
+    const probeCount = allocation.stage.explicitDuration
+      ? Math.min(context.limit - tracks.length, count + 4)
+      : count;
+    const stageTracks = await enrichProfileSongCandidates(
+      rankedSongs,
+      probeCount,
+      context.state,
+      context.recommendationContext,
+      selectedIds,
+    );
+    const selectedStageTracks = selectStageTracksForAllocation(stageTracks, allocation, count);
+
+    for (const track of selectedStageTracks) {
+      selectedIds.add(String(track.id || ""));
+      tracks.push({
+        ...track,
+        recommendSource: "liked-library",
+        recommendQuery: allocation.stage.title,
+        playlistStage: compactRecommendationStage(allocation.stage, allocation.index),
+      });
+    }
+
+    tracks = dedupeRecommendedTracks(tracks, context.recommendationContext);
+  }
+
+  return tracks.slice(0, context.limit);
+}
+
+function selectStageTracksForAllocation(tracks, allocation, fallbackCount) {
+  const source = Array.isArray(tracks) ? tracks : [];
+  if (!allocation?.stage?.explicitDuration || !allocation.stage.targetMinutes) {
+    return source.slice(0, fallbackCount);
+  }
+
+  const targetMs = allocation.stage.targetMinutes * 60000;
+  const result = [];
+  let totalMs = 0;
+
+  for (const track of source) {
+    if (result.length >= fallbackCount && totalMs >= targetMs) break;
+    result.push(track);
+    totalMs += normalizeNumber(track.duration) || STAGED_PLAYLIST_AVERAGE_TRACK_MS;
+    if (result.length >= STAGED_PLAYLIST_MIN_STAGE_TRACKS && totalMs >= targetMs) break;
+  }
+
+  return result.length ? result : source.slice(0, fallbackCount);
+}
+
+function allocateStageTrackCounts(stages, limit) {
+  const normalized = normalizeRecommendationStages(stages);
+  const maxCount = Math.max(normalized.length, Math.min(PLAYLIST_RECOMMENDATION_LIMIT, Number(limit) || PLAYLIST_RECOMMENDATION_DEFAULT));
+  if (!normalized.length) return [];
+
+  const baseCounts = normalized.map((stage) => ({
+    stage,
+    count: Math.max(
+      STAGED_PLAYLIST_MIN_STAGE_TRACKS,
+      Math.round(((stage.targetMinutes || 0) * 60000) / STAGED_PLAYLIST_AVERAGE_TRACK_MS),
+    ),
+  }));
+  const hasExplicitDuration = normalized.some((stage) => stage.explicitDuration);
+  let target = baseCounts.reduce((sum, item) => sum + item.count, 0);
+  target = hasExplicitDuration
+    ? Math.min(maxCount, Math.max(PLAYLIST_RECOMMENDATION_MIN, target))
+    : maxCount;
+
+  while (baseCounts.reduce((sum, item) => sum + item.count, 0) < target) {
+    const candidate = baseCounts
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => {
+        const explicitDelta = Number(a.item.stage.explicitDuration) - Number(b.item.stage.explicitDuration);
+        if (explicitDelta) return explicitDelta;
+        return b.index - a.index;
+      })[0];
+    candidate.item.count += 1;
+  }
+
+  while (baseCounts.reduce((sum, item) => sum + item.count, 0) > target) {
+    const candidate = baseCounts
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.count > STAGED_PLAYLIST_MIN_STAGE_TRACKS)
+      .sort((a, b) => b.item.count - a.item.count || Number(b.item.stage.explicitDuration) - Number(a.item.stage.explicitDuration))[0];
+    if (!candidate) break;
+    candidate.item.count -= 1;
+  }
+
+  return baseCounts.map((item, index) => ({ ...item, index }));
+}
+
+function createSceneForPlaylistStage(baseScene = {}, stage = {}) {
+  const normalized = normalizeRecommendationStage(stage, stage.index || 0) || {};
+  const baseKeywords = getBaseKeywordsForPlaylistStage(baseScene, normalized);
+  return {
+    ...baseScene,
+    mood: normalized.mood || baseScene.mood || "random",
+    keywords: [...new Set([
+      ...(normalized.keywords || []),
+      normalized.title,
+      ...baseKeywords.slice(0, 6),
+    ].map(cleanRecommendationSearchQuery).filter(Boolean))].slice(0, 16),
+    styleHints: [...new Set([
+      ...(normalized.styleHints || []),
+      ...(baseScene.styleHints || []).slice(0, 6),
+    ].map(String).filter(Boolean))].slice(0, 12),
+    activeStage: compactRecommendationStage(normalized, normalized.index || 0),
+  };
+}
+
+function getBaseKeywordsForPlaylistStage(baseScene = {}, activeStage = {}) {
+  const otherStageTerms = new Set();
+  for (const stage of normalizeRecommendationStages(baseScene.stages)) {
+    if (stage.label === activeStage.label) continue;
+    for (const value of [stage.title, ...(stage.keywords || [])]) {
+      const normalized = normalizeSearchText(value);
+      if (normalized) otherStageTerms.add(normalized);
+    }
+  }
+
+  return (baseScene.keywords || []).filter((keyword) => {
+    const normalized = normalizeSearchText(keyword);
+    return normalized && !otherStageTerms.has(normalized);
+  });
 }
 
 function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds, recentRadioIds }) {
@@ -3304,18 +3881,44 @@ function splitArtistNames(value) {
 
 function dedupeRecommendedTracks(tracks, recommendationContext) {
   const seenIdentities = new Set();
+  const seenCanonicalSongs = new Set();
   const result = [];
 
   for (const track of tracks) {
     const identity = trackIdentity(track);
+    const canonicalSong = trackCanonicalSongIdentity(track);
     if (seenIdentities.has(identity)) continue;
+    if (canonicalSong && seenCanonicalSongs.has(canonicalSong)) continue;
+    if (hasAlternateVersionDuplicate(result, track)) continue;
     if (hasKnownTitleDuplicate(result, track, recommendationContext)) continue;
 
     seenIdentities.add(identity);
+    if (canonicalSong) seenCanonicalSongs.add(canonicalSong);
     result.push(track);
   }
 
   return result;
+}
+
+function trackCanonicalSongIdentity(track) {
+  const title = normalizeSongTitleForMatch(track?.title);
+  if (!title || title.length < 2 || LOW_SIGNAL_TITLE_TERMS.has(title)) return "";
+
+  const artist = splitArtistNames(track?.artist)
+    .map(normalizeSearchText)
+    .find(Boolean);
+  return artist ? `${title}:${artist}` : title;
+}
+
+function hasAlternateVersionDuplicate(tracks, candidate) {
+  const title = normalizeSongTitleForMatch(candidate?.title);
+  if (!title || title.length < 4 || LOW_SIGNAL_TITLE_TERMS.has(title)) return false;
+  const candidateIsVersion = isAlternateVersionTitle(candidate?.title);
+
+  return tracks.some((track) => {
+    if (normalizeSongTitleForMatch(track?.title) !== title) return false;
+    return candidateIsVersion || isAlternateVersionTitle(track?.title);
+  });
 }
 
 function weaveTrackGroups(primaryTracks, secondaryTracks, limit = PLAYLIST_RECOMMENDATION_LIMIT) {
@@ -3410,20 +4013,23 @@ function isDislikedCandidate(track, state) {
 
 function buildRecommendationScene(message, clientContext = {}) {
   const text = normalizeSearchText(message);
-  const now = new Date();
-  const hour = now.getHours();
-  const day = now.getDay();
+  const currentLocalTime = buildCurrentLocalTimeContext(clientContext);
+  const hour = currentLocalTime.hour;
+  const day = currentLocalTime.weekday;
   const isWeekend = day === 0 || day === 6 || /周末|weekend/i.test(clientContext.weekend || "");
   const weather = String(clientContext.weather || "");
   const weatherText = normalizeSearchText(weather);
   const keywords = new Set();
   const styleHints = new Set();
-  let mood = "random";
+  const stages = buildRecommendationStages(message);
+  let mood = stages[0]?.mood || "random";
 
-  if (containsAny(text, ["睡", "晚安", "助眠", "sleep", "relax", "放松"])) mood = "sleep";
-  else if (containsAny(text, ["工作", "学习", "专注", "写代码", "coding", "focus", "阅读"])) mood = "focus";
-  else if (containsAny(text, ["提神", "跑步", "运动", "蹦迪", "dj", "energy", "high"])) mood = "energy";
-  else if (containsAny(text, ["开车", "通勤", "路上", "drive"])) mood = "chill";
+  if (mood === "random") {
+    if (containsAny(text, ["睡", "晚安", "助眠", "sleep", "relax", "放松"])) mood = "sleep";
+    else if (containsAny(text, ["工作", "学习", "专注", "写代码", "coding", "focus", "阅读"])) mood = "focus";
+    else if (containsAny(text, ["提神", "跑步", "运动", "蹦迪", "dj", "energy", "high"])) mood = "energy";
+    else if (containsAny(text, ["开车", "通勤", "路上", "drive"])) mood = "chill";
+  }
 
   if (mood === "random") {
     if (hour < 6 || hour >= 23) mood = "sleep";
@@ -3436,6 +4042,11 @@ function buildRecommendationScene(message, clientContext = {}) {
   if (mood === "sleep") addMany(keywords, ["sleep", "ambient", "piano", "jazz", "acoustic"]);
   if (mood === "energy") addMany(keywords, ["disco", "electronic", "dance", "funk", "city pop"]);
   if (mood === "chill") addMany(keywords, ["chill", "city pop", "jazz", "r&b", "drive"]);
+
+  for (const stage of stages) {
+    addMany(keywords, stage.keywords || []);
+    addMany(styleHints, stage.styleHints || []);
+  }
 
   if (containsAny(text, ["8bit", "像素", "chiptune"])) addMany(keywords, ["8-bit", "chiptune"]);
   if (containsAny(text, ["复古", "disco", "citypop", "citypop"])) addMany(keywords, ["retro", "disco", "city pop"]);
@@ -3464,6 +4075,274 @@ function buildRecommendationScene(message, clientContext = {}) {
     weather,
     timeSlot: getTimeSlot(hour),
     timeSlotLabel: getTimeSlotLabel(hour),
+    localTime: currentLocalTime,
+    stages,
+  };
+}
+
+function buildRecommendationStages(message) {
+  const raw = String(message || "");
+  if (!raw.trim()) return [];
+
+  const lower = raw.toLowerCase();
+  const found = getRecommendationStageDescriptors()
+    .map((descriptor) => {
+      const match = findStageDescriptorMatch(lower, descriptor);
+      return match ? { descriptor, ...match } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index);
+
+  const deduped = [];
+  for (const item of found) {
+    if (deduped.some((existing) => existing.descriptor.label === item.descriptor.label)) continue;
+    deduped.push(item);
+  }
+
+  if (deduped.length < 2 || !looksLikeSequentialStageRequest(raw)) return [];
+
+  return normalizeRecommendationStages(deduped.map((item, index) => {
+    const next = deduped[index + 1];
+    const segmentStart = Math.max(0, item.index - 10);
+    const segmentEnd = next ? next.index : raw.length;
+    const segment = raw.slice(segmentStart, segmentEnd);
+    const targetMinutes = extractStageTargetMinutes(segment);
+
+    return {
+      label: item.descriptor.label,
+      title: item.descriptor.title,
+      mood: item.descriptor.mood,
+      targetMinutes: targetMinutes || item.descriptor.defaultMinutes,
+      explicitDuration: Boolean(targetMinutes),
+      keywords: item.descriptor.keywords,
+      styleHints: item.descriptor.styleHints,
+    };
+  }));
+}
+
+function getRecommendationStageDescriptors() {
+  return [
+    {
+      label: "coding",
+      title: "写代码",
+      mood: "focus",
+      terms: ["写代码", "敲代码", "代码", "coding", "编程", "开发"],
+      keywords: ["focus", "lofi", "instrumental", "ambient", "低人声", "写代码"],
+      styleHints: ["instrumental", "ambient", "lofi"],
+      defaultMinutes: 30,
+    },
+    {
+      label: "study",
+      title: "学习",
+      mood: "focus",
+      terms: ["学习", "看书", "阅读", "论文", "复习", "study"],
+      keywords: ["focus", "lofi", "piano", "jazz", "低人声", "学习"],
+      styleHints: ["instrumental", "soft", "lofi"],
+      defaultMinutes: 35,
+    },
+    {
+      label: "work",
+      title: "工作",
+      mood: "focus",
+      terms: ["工作", "上班", "办公", "work"],
+      keywords: ["focus", "jazz", "ambient", "city pop", "工作"],
+      styleHints: ["instrumental", "ambient", "steady"],
+      defaultMinutes: 40,
+    },
+    {
+      label: "shower",
+      title: "洗澡",
+      mood: "chill",
+      terms: ["洗澡", "冲澡", "沐浴", "洗漱"],
+      keywords: ["chill", "r&b", "city pop", "清爽", "放松", "洗澡"],
+      styleHints: ["soft", "groove", "warm"],
+      defaultMinutes: 12,
+    },
+    {
+      label: "sleep",
+      title: "睡前",
+      mood: "sleep",
+      terms: ["睡觉", "睡前", "睡眠", "入睡", "晚安", "助眠", "sleep"],
+      keywords: ["sleep", "ambient", "piano", "acoustic", "低刺激", "睡前"],
+      styleHints: ["soft", "ambient", "acoustic"],
+      defaultMinutes: 24,
+    },
+    {
+      label: "commute",
+      title: "通勤",
+      mood: "chill",
+      terms: ["通勤", "开车", "路上", "地铁", "drive", "commute"],
+      keywords: ["chill", "city pop", "r&b", "drive", "通勤"],
+      styleHints: ["groove", "city pop", "steady"],
+      defaultMinutes: 25,
+    },
+    {
+      label: "workout",
+      title: "运动",
+      mood: "energy",
+      terms: ["运动", "跑步", "健身", "骑车", "workout", "running"],
+      keywords: ["energy", "dance", "electronic", "funk", "运动"],
+      styleHints: ["dance", "electronic", "groove"],
+      defaultMinutes: 30,
+    },
+    {
+      label: "game",
+      title: "游戏",
+      mood: "energy",
+      terms: ["打游戏", "游戏", "打瓦", "无畏契约", "valorant", "开黑"],
+      keywords: ["energy", "electronic", "rock", "battle", "游戏"],
+      styleHints: ["electronic", "rock", "cinematic"],
+      defaultMinutes: 30,
+    },
+  ];
+}
+
+function looksLikeSequentialStageRequest(raw) {
+  const text = String(raw || "");
+  return /然后|接着|之后|随后|最后|先.+再|先.+然后|再去|再来|then|after|before|later/i.test(text) ||
+    extractStageTargetMinutes(text) > 0;
+}
+
+function findStageDescriptorMatch(lowerRaw, descriptor) {
+  let best = null;
+  for (const term of descriptor.terms || []) {
+    const normalizedTerm = String(term || "").toLowerCase();
+    const index = lowerRaw.indexOf(normalizedTerm);
+    if (index < 0) continue;
+    if (!best || index < best.index) best = { index, term };
+  }
+  return best;
+}
+
+function extractStageTargetMinutes(segment) {
+  const text = String(segment || "");
+  const hourHalfMatch = text.match(/([一二两三四五六七八九十\d.]+)\s*(?:个)?半\s*小时/u);
+  if (hourHalfMatch) {
+    const value = parseSmallDurationNumber(hourHalfMatch[1]);
+    if (Number.isFinite(value)) return clampStageTargetMinutes((value + 0.5) * 60);
+  }
+
+  const hourMatch = text.match(/([一二两三四五六七八九十半\d.]+)\s*(?:个)?\s*(?:小时|钟头|h|hour|hours)/iu);
+  if (hourMatch) {
+    const value = parseSmallDurationNumber(hourMatch[1]);
+    if (Number.isFinite(value)) return clampStageTargetMinutes(value * 60);
+  }
+
+  const minuteMatch = text.match(/([一二两三四五六七八九十\d.]+)\s*(?:分钟|分|min|mins|minute|minutes)/iu);
+  if (minuteMatch) {
+    const value = parseSmallDurationNumber(minuteMatch[1]);
+    if (Number.isFinite(value)) return clampStageTargetMinutes(value);
+  }
+
+  return 0;
+}
+
+function parseSmallDurationNumber(value) {
+  const text = String(value || "").trim();
+  if (!text) return NaN;
+  if (text === "半") return 0.5;
+  const digit = Number(text);
+  if (Number.isFinite(digit)) return digit;
+
+  const map = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (map[text]) return map[text];
+  if (text === "十") return 10;
+  if (text.startsWith("十")) return 10 + (map[text.slice(1)] || 0);
+  if (text.includes("十")) {
+    const [left, right] = text.split("十");
+    return (map[left] || 0) * 10 + (map[right] || 0);
+  }
+  return NaN;
+}
+
+function clampStageTargetMinutes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.max(5, Math.min(180, Math.round(number)));
+}
+
+function normalizeRecommendationStages(stages) {
+  if (!Array.isArray(stages)) return [];
+  const result = [];
+
+  for (const item of stages) {
+    const stage = normalizeRecommendationStage(item, result.length);
+    if (!stage) continue;
+    if (result.some((existing) => existing.label === stage.label && existing.mood === stage.mood)) continue;
+    result.push(stage);
+    if (result.length >= 6) break;
+  }
+
+  return result;
+}
+
+function normalizeRecommendationStage(item, index = 0) {
+  if (!item || typeof item !== "object") return null;
+  const mood = normalizeMoodName(item.mood, "random");
+  const label = String(item.label || item.name || item.title || `stage-${index + 1}`)
+    .trim()
+    .slice(0, 32);
+  const title = String(item.title || item.label || label)
+    .trim()
+    .slice(0, 32);
+  const keywords = normalizeStageKeywordList([
+    ...(Array.isArray(item.keywords) ? item.keywords : []),
+    title,
+  ]);
+  const styleHints = normalizeStageKeywordList(item.styleHints || item.styles || []);
+  const targetMinutes = clampStageTargetMinutes(item.targetMinutes || item.minutes || item.durationMinutes);
+
+  if (!label && !title && !keywords.length) return null;
+
+  return {
+    index,
+    label: label || title || `stage-${index + 1}`,
+    title: title || label || `阶段 ${index + 1}`,
+    mood,
+    targetMinutes,
+    explicitDuration: Boolean(item.explicitDuration),
+    keywords,
+    styleHints,
+  };
+}
+
+function normalizeStageKeywordList(values) {
+  const source = Array.isArray(values) ? values : [values];
+  return [...new Set(source
+    .map(cleanRecommendationSearchQuery)
+    .filter(Boolean))]
+    .slice(0, 8);
+}
+
+function normalizeMoodName(value, fallback = "random") {
+  const mood = String(value || "").trim();
+  return ["focus", "chill", "energy", "sleep", "random"].includes(mood) ? mood : fallback;
+}
+
+function hasPlaylistStagePlan(plan = {}) {
+  return normalizeRecommendationStages(plan.scene?.stages).length > 1;
+}
+
+function compactRecommendationStage(stage, index = 0) {
+  const normalized = normalizeRecommendationStage(stage, index);
+  if (!normalized) return null;
+  return {
+    index: normalized.index,
+    label: normalized.label,
+    title: normalized.title,
+    mood: normalized.mood,
+    targetMinutes: normalized.targetMinutes,
   };
 }
 
@@ -3472,8 +4351,51 @@ function normalizeClientContext(value = {}) {
     date: String(value.date || "").slice(0, 40),
     weekend: String(value.weekend || "").slice(0, 40),
     weather: String(value.weather || "").slice(0, 80),
+    time: String(value.time || "").slice(0, 20),
+    timestamp: Number.isFinite(Number(value.timestamp)) ? Number(value.timestamp) : 0,
     timezoneOffset: Number.isFinite(Number(value.timezoneOffset)) ? Number(value.timezoneOffset) : null,
+    timezoneName: String(value.timezoneName || "").slice(0, 80),
   };
+}
+
+function buildCurrentLocalTimeContext(clientContext = {}) {
+  const timestamp = Number(clientContext.timestamp) || Date.now();
+  const timezoneOffset = Number.isFinite(Number(clientContext.timezoneOffset))
+    ? Number(clientContext.timezoneOffset)
+    : new Date(timestamp).getTimezoneOffset();
+  const localDate = new Date(timestamp - timezoneOffset * 60000);
+  const year = localDate.getUTCFullYear();
+  const month = String(localDate.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(localDate.getUTCDate()).padStart(2, "0");
+  const hour = localDate.getUTCHours();
+  const minute = localDate.getUTCMinutes();
+  const second = localDate.getUTCSeconds();
+  const timeLabel = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const dateLabel = `${year}-${month}-${day}`;
+
+  return {
+    date: dateLabel,
+    time: timeLabel,
+    isoLocal: `${dateLabel}T${timeLabel}:${String(second).padStart(2, "0")}`,
+    hour,
+    minute,
+    weekday: localDate.getUTCDay(),
+    dayPeriod: getLocalDayPeriod(hour),
+    timezoneOffsetMinutes: timezoneOffset,
+    timezoneName: String(clientContext.timezoneName || "").slice(0, 80),
+    displayDate: String(clientContext.date || "").slice(0, 40),
+    displayTime: String(clientContext.time || timeLabel).slice(0, 20),
+  };
+}
+
+function getLocalDayPeriod(hour) {
+  const value = Number(hour);
+  if (value < 5) return "late-night";
+  if (value < 11) return "morning";
+  if (value < 14) return "noon";
+  if (value < 18) return "afternoon";
+  if (value < 23) return "evening";
+  return "late-night";
 }
 
 function normalizeProfileSongs(songs) {
@@ -3789,8 +4711,25 @@ function getLevenshteinDistance(left, right) {
 
 function extractRequestedSongCount(message) {
   const text = String(message || "");
-  const digitMatch = text.match(/([2-5])\s*首/u);
+  const digitMatch = text.match(/(\d{1,2})\s*首/u);
   if (digitMatch) return Number(digitMatch[1]);
+  if (/三十首/u.test(text)) return 30;
+  if (/二十九首/u.test(text)) return 29;
+  if (/二十八首/u.test(text)) return 28;
+  if (/二十七首/u.test(text)) return 27;
+  if (/二十六首/u.test(text)) return 26;
+  if (/二十五首/u.test(text)) return 25;
+  if (/二十四首/u.test(text)) return 24;
+  if (/二十三首/u.test(text)) return 23;
+  if (/二十二首/u.test(text)) return 22;
+  if (/二十一首/u.test(text)) return 21;
+  if (/二十首/u.test(text)) return 20;
+  if (/十九首/u.test(text)) return 19;
+  if (/十八首/u.test(text)) return 18;
+  if (/十七首/u.test(text)) return 17;
+  if (/十六首/u.test(text)) return 16;
+  if (/十五首/u.test(text)) return 15;
+  if (/十首/u.test(text)) return 10;
   if (/一两首|两首|2首/u.test(text)) return 2;
   if (/三首|3首/u.test(text)) return 3;
   if (/四首|4首/u.test(text)) return 4;
@@ -4557,6 +5496,10 @@ function normalizePlan(plan, message, clientContext = {}) {
       ? plan.queue.slice(0, 8).map(String)
       : fallback.queue;
   const scene = buildRecommendationScene(message, clientContext);
+  const planScene = plan?.scene && typeof plan.scene === "object" ? plan.scene : {};
+  if (Array.isArray(planScene.stages) && planScene.stages.length) {
+    scene.stages = normalizeRecommendationStages(planScene.stages);
+  }
   if (requestedTrackQueries.length || seedQueries.length) {
     scene.keywords = [
       ...new Set([
@@ -4566,6 +5509,7 @@ function normalizePlan(plan, message, clientContext = {}) {
       ].map(cleanRecommendationSearchQuery).filter(Boolean)),
     ].slice(0, 16);
   }
+  scene.mood = mood;
 
   return {
     intent,
@@ -4868,8 +5812,14 @@ function normalizeQueueTrack(track) {
     br: normalizeNumber(track.br),
     sourceCode: normalizeNumber(track.sourceCode),
     tags: Array.isArray(track.tags) ? track.tags.slice(0, 12).map((tag) => String(tag).slice(0, 40)) : [],
+    playlistStage: normalizeTrackPlaylistStage(track.playlistStage),
     hostIntro: normalizeQueueHostIntro(track.hostIntro),
   };
+}
+
+function normalizeTrackPlaylistStage(value) {
+  const stage = compactRecommendationStage(value, value?.index || 0);
+  return stage || null;
 }
 
 function normalizeQueueHostIntro(value) {
@@ -4881,7 +5831,7 @@ function normalizeQueueHostIntro(value) {
   return {
     enabled: value.enabled !== false,
     voiceCueId: String(value.voiceCueId || "").slice(0, 90),
-    startAtMs: clampMs(value.startAtMs, 0, 0, 60000),
+    startAtMs: clampMs(value.startAtMs, 0, 0, HOST_INTRO_MAX_START_AT_MS),
     estimatedDurationMs: clampMs(
       value.estimatedDurationMs,
       estimateHostIntroDurationMs(displayText),
@@ -4900,6 +5850,7 @@ function normalizeQueueHostIntro(value) {
     ducking: normalizeVoiceDucking(value.ducking),
     tone: String(value.tone || "context").slice(0, 32),
     moodIntent: String(value.moodIntent || "random").slice(0, 32),
+    placement: String(value.placement || "").slice(0, 32),
     source: String(value.source || "").slice(0, 40),
   };
 }

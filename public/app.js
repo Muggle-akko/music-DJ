@@ -98,6 +98,7 @@ const VOICE_PLAYBACK_RATE = 1.2;
 const VOICE_DUCK_FADE_OUT_MS = 750;
 const VOICE_DUCK_FADE_IN_MS = 1400;
 const VOICE_SCHEDULE_MAX_DELAY_MS = 2 ** 31 - 1;
+const HOST_INTRO_MAX_START_AT_MS = 12 * 60 * 1000 - 15000;
 const HOST_CAPTION_IDLE_TEXT = "等待主播解说";
 const HOST_CAPTION_IDLE_TEXTS = [
   "主播认真听歌中",
@@ -570,11 +571,15 @@ function parseStreamEvent(line) {
 }
 
 function getClientContext() {
+  const now = new Date();
   return {
     date: dateInfo?.textContent || "",
     weekend: weekendInfo?.textContent || "",
     weather: weatherInfo?.textContent || "",
-    timezoneOffset: new Date().getTimezoneOffset(),
+    time: clockDisplay?.textContent || "",
+    timestamp: now.getTime(),
+    timezoneOffset: now.getTimezoneOffset(),
+    timezoneName: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
   };
 }
 
@@ -2708,7 +2713,19 @@ function normalizeClientTrack(track) {
     br: Number(track.br) || 0,
     sourceCode: Number(track.sourceCode) || 0,
     tags: Array.isArray(track.tags) ? track.tags : [],
+    playlistStage: normalizeClientPlaylistStage(track.playlistStage),
     hostIntro: normalizeClientHostIntro(track.hostIntro),
+  };
+}
+
+function normalizeClientPlaylistStage(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    index: Number.isFinite(Number(value.index)) ? Number(value.index) : 0,
+    label: String(value.label || "").slice(0, 32),
+    title: String(value.title || "").slice(0, 32),
+    mood: String(value.mood || "random").slice(0, 32),
+    targetMinutes: Number(value.targetMinutes) || 0,
   };
 }
 
@@ -2721,7 +2738,7 @@ function normalizeClientHostIntro(value) {
   return {
     enabled: value.enabled !== false,
     voiceCueId: String(value.voiceCueId || "").slice(0, 90),
-    startAtMs: clampMilliseconds(value.startAtMs, 0, 0, 60000),
+    startAtMs: clampMilliseconds(value.startAtMs, 0, 0, HOST_INTRO_MAX_START_AT_MS),
     estimatedDurationMs: clampMilliseconds(
       value.estimatedDurationMs,
       estimateClientHostIntroDurationMs(displayText),
@@ -2740,6 +2757,7 @@ function normalizeClientHostIntro(value) {
     ducking: normalizeClientVoiceDucking(value.ducking),
     tone: String(value.tone || "context").slice(0, 32),
     moodIntent: String(value.moodIntent || "random").slice(0, 32),
+    placement: String(value.placement || "").slice(0, 32),
     source: String(value.source || "").slice(0, 40),
   };
 }
