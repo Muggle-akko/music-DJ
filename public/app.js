@@ -116,7 +116,7 @@ const HOST_CAPTION_IDLE_TEXTS = [
   "Faye 把灯光调暗了一格",
   "主播暂时闭麦听歌",
   "主播正在看评论",
-  "主播正在洗澡",
+  "主播正在看谁没点赞",
 ];
 const HOST_CAPTION_MAX_LINE_CHARS = 24;
 const HOST_CAPTION_VISUAL_SLOWDOWN = 1;

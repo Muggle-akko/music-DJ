@@ -193,7 +193,7 @@ const DJ_INSTRUCTIONS = [
   "You are Faye, a gentle, cheerful female DJ host inside the Awudio personal web player.",
   "Return only valid JSON. No markdown, no comments.",
   "Schema:",
-  '{"intent":"recommend|playlist|music_chat|library_query","say":"Chinese DJ line under 36 chars","reason":"Chinese reason under 90 chars","mood":"focus|chill|energy|sleep|random","search":"best fallback NetEase search keyword","seedQueries":[{"query":"NetEase search keyword","intent":"why this query fits","weight":1}],"queue":["keyword 1","keyword 2"],"avoid":["artist or song to avoid"],"voice":false}',
+  '{"intent":"recommend|playlist|music_chat|library_query","say":"Chinese DJ line under 36 chars","reason":"Chinese reason under 90 chars","mood":"focus|chill|energy|sleep|random","search":"best fallback NetEase search keyword","requestedTrackQueries":["exact song title only when listener names a specific song"],"playlistSearchQuery":"optional playlist/theme search keyword","seedQueries":[{"query":"NetEase search keyword","intent":"why this query fits","weight":1}],"queue":["keyword 1","keyword 2"],"avoid":["artist or song to avoid"],"voice":false}',
   "Voice: warm, bright, concise, and lightly hosted like a radio DJ. Do not be overly cute or verbose.",
   "Persona rule: the long-term listening profile is Faye's own DJ taste, distilled from the listener's library. Public copy should say my taste, my library, or my radio instinct; do not frame recommendations as the user's taste or the user's preferences.",
   "Never start with repetitive acknowledgements such as '收到', '好的', '明白', or '我会'.",
@@ -204,6 +204,9 @@ const DJ_INSTRUCTIONS = [
   "Use library_query when the listener asks about the liked library or playlists behind Faye's DJ taste, such as recent additions, new releases, top artists, or which songs match a condition. Do not turn that into a recommendation.",
   "For recommend/playlist, analyze current mood/time, liked songs, liked library, recent plays, queue, disliked songs, and Faye's distilled listening profile.",
   "For recommend/playlist, generate 6 to 10 practical NetEase Music search queries. Prefer exact song/artist pairs when known, otherwise artist + style, playlist-friendly Chinese keywords, or mood/genre terms.",
+  "When the listener mixes exact songs with a broad theme, split only the explicitly named songs into requestedTrackQueries. Put artist/theme/constraint phrases in seedQueries or playlistSearchQuery instead.",
+  "Example: '来一期贾斯汀比伯，我想听beauty and a beat和all around the world以及一些经典的比伯的歌，不要有重复歌曲' should use requestedTrackQueries ['Beauty And A Beat','All Around The World']; do not use '来一期贾斯汀比伯' or '一些经典的比伯的歌' as exact tracks.",
+  "If a phrase might be a theme, artist request, constraint, or sentence fragment instead of a title, leave it out of requestedTrackQueries.",
   "Use liked artists/songs as taste anchors, but do not expose internal filtering details or name songs you avoided.",
   "Respect disliked artists/songs and avoid blocked or overplayed tracks.",
   "When the listener asks for a playlist, explain Faye's taste direction briefly; do not list many song titles in the chat text because the UI shows the playlist separately.",
@@ -819,7 +822,12 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
 
   await options.onStatus?.("生成 DJ 推荐计划");
 
-  const plan = routeToRecommendationPlan(route, message, state, tasteContext, clientContext);
+  const routePlan = routeToRecommendationPlan(route, message, state, tasteContext, clientContext);
+  let plan = routePlan;
+  if (shouldUseAiRecommendationPlan(message, route, mode)) {
+    await options.onStatus?.("让 AI 拆分点歌需求");
+    plan = await createAiBackedRecommendationPlan(message, routePlan, state, tasteContext, clientContext);
+  }
   const executionMode = route.replyMode === "replace_queue" || route.shouldReplaceQueue || plan.strictPlaylistTheme ? "playlist" : "chat";
   const executionLimit = executionMode === "playlist" ? PLAYLIST_RECOMMENDATION_LIMIT : getRouteRecommendationLimit(route, limit);
   await options.onStatus?.("匹配可播放歌曲");
@@ -827,11 +835,21 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
   const recommendationContext = buildRecommendationFilterContext(state, tasteContext);
   let tracks = [];
 
+  const requestedTracks = await resolveRequestedTrackCandidates(plan, state, Math.min(executionLimit, CHAT_RECOMMENDATION_LIMIT), {
+    tasteContext,
+    clientContext,
+    mode: executionMode,
+    recommendationContext,
+  });
+  tracks = dedupeRecommendedTracks(requestedTracks, recommendationContext).slice(0, executionLimit);
+
   if (executionMode === "playlist" && plan.playlistSearchQuery) {
     await options.onStatus?.("搜索网易云歌单");
-    tracks = await resolvePlaylistSearchTracks(plan, state, executionLimit, {
+    const playlistTracks = await resolvePlaylistSearchTracks(plan, state, executionLimit - tracks.length, {
       recommendationContext,
+      excludedTracks: tracks,
     });
+    tracks = dedupeRecommendedTracks([...tracks, ...playlistTracks], recommendationContext).slice(0, executionLimit);
   }
 
   if (tracks.length < executionLimit && plan.strictPlaylistTheme) {
@@ -858,6 +876,7 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
       clientContext,
       mode: executionMode,
       recommendationContext,
+      skipRequestedTracks: requestedTracks.length > 0,
     });
     tracks = dedupeRecommendedTracks([...tracks, ...recommendedTracks], recommendationContext).slice(0, executionLimit);
   }
@@ -870,7 +889,11 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
     });
   }
 
-  if (executionMode === "playlist" && tracks.some((track) => track.playable && track.url)) {
+  if (
+    executionMode === "playlist" &&
+    tracks.some((track) => track.playable && track.url) &&
+    shouldGeneratePlaylistVoice(plan, tracks)
+  ) {
     await options.onStatus?.("生成主持人串词");
     tracks = await attachHostIntrosToPlaylistTracks(tracks, {
       message,
@@ -983,6 +1006,11 @@ function buildDjReply(plan, tracks, options = {}) {
   }
 
   return lines.join("\n");
+}
+
+function shouldGeneratePlaylistVoice(plan = {}, tracks = []) {
+  const requestedStatus = getRequestedTrackStatus(plan, tracks);
+  return !requestedStatus.missing.length || requestedStatus.included.length > 0;
 }
 
 function getRequestedTrackStatus(plan = {}, tracks = []) {
@@ -2068,6 +2096,88 @@ function routeToRecommendationPlan(route, message, state, tasteContext, clientCo
   };
 }
 
+function shouldUseAiRecommendationPlan(message, route = {}, mode = "chat") {
+  if (AI_PROVIDER === "local") return false;
+  if (mode === "playlist" || route.intent === "playlist" || route.replyMode === "replace_queue") return true;
+  return isComplexSongListRequest(message);
+}
+
+async function createAiBackedRecommendationPlan(message, routePlan, state, tasteContext, clientContext = {}) {
+  try {
+    const aiPlan = await createDjPlan(message, state, tasteContext, clientContext);
+    return mergeAiRecommendationPlan(routePlan, aiPlan, message);
+  } catch (error) {
+    console.warn("AI recommendation plan failed, using routed plan:", error.message);
+    return routePlan;
+  }
+}
+
+function mergeAiRecommendationPlan(routePlan, aiPlan = {}, message) {
+  if (!aiPlan || typeof aiPlan !== "object") return routePlan;
+
+  const localRequested = normalizeRequestedTrackQueries(extractRequestedTrackQueries(message));
+  const aiRequested = normalizeRequestedTrackQueries(aiPlan.requestedTrackQueries);
+  const requestedTrackQueries = aiRequested.length ? aiRequested : localRequested;
+  const seedQueries = normalizeSeedQueries(
+    [
+      ...requestedTrackQueries.map((query, index) => ({
+        query,
+        intent: "requested-track",
+        weight: 100 - index,
+      })),
+      ...(Array.isArray(aiPlan.seedQueries) ? aiPlan.seedQueries : []),
+    ],
+    aiPlan.queue,
+    cleanRecommendationSearchQuery(aiPlan.search) || routePlan.search,
+  ).filter((item) => isUsableRecommendationQuery(item.query));
+  const fallbackSeedQueries = (Array.isArray(routePlan.seedQueries) ? routePlan.seedQueries : [])
+    .filter((item) => isUsableRecommendationQuery(item?.query));
+  const finalSeedQueries = seedQueries.length ? seedQueries : fallbackSeedQueries;
+  const search = cleanRecommendationSearchQuery(aiPlan.search) || finalSeedQueries[0]?.query || routePlan.search;
+  const playlistSearchQuery =
+    cleanRecommendationSearchQuery(aiPlan.playlistSearchQuery) ||
+    routePlan.playlistSearchQuery ||
+    "";
+  const mood = ["focus", "chill", "energy", "sleep", "random"].includes(aiPlan.mood)
+    ? aiPlan.mood
+    : routePlan.mood;
+  const sceneKeywords = [
+    ...requestedTrackQueries,
+    playlistSearchQuery,
+    ...finalSeedQueries.map((item) => item.query),
+    ...(routePlan.scene?.keywords || []).filter(isUsableRecommendationQuery),
+  ];
+
+  return {
+    ...routePlan,
+    say: cleanVisibleDjLine(String(aiPlan.say || routePlan.say || "").slice(0, 60)),
+    reason: sanitizePublicRouteText(aiPlan.reason, routePlan.reason),
+    mood,
+    search,
+    seedQueries: finalSeedQueries,
+    queue: finalSeedQueries.map((item) => item.query),
+    avoid: Array.isArray(aiPlan.avoid) ? aiPlan.avoid.slice(0, 12).map(String) : routePlan.avoid || [],
+    voice: Boolean(aiPlan.voice),
+    requestedTrackQueries,
+    playlistSearchQuery,
+    exactTrackOnly: requestedTrackQueries.length > 0 && (routePlan.exactTrackOnly || Boolean(aiPlan.exactTrackOnly)),
+    scene: {
+      ...routePlan.scene,
+      ...(aiPlan.scene && typeof aiPlan.scene === "object" ? aiPlan.scene : {}),
+      mood,
+      keywords: [...new Set(sceneKeywords.map(cleanRecommendationSearchQuery).filter(Boolean))].slice(0, 16),
+    },
+  };
+}
+
+function isComplexSongListRequest(message) {
+  const raw = String(message || "");
+  if (!raw.trim()) return false;
+  if (/想听.+(?:和|以及|还有|、).+/u.test(raw)) return true;
+  if (/不要.*重复|别.*重复|不重复/u.test(raw)) return true;
+  return /(?:来一期|歌单|一些|几首|经典|主题)/u.test(raw) && /(?:想听|播放|推荐|来点|放点)/u.test(raw);
+}
+
 function getPlaylistSearchQueryForPlan(message, routeQueries = []) {
   const raw = String(message || "");
   const wantsExternalPlaylist = isExternalNcmPlaylistRequest(raw);
@@ -2106,18 +2216,18 @@ function getKnownThemeQuery(value) {
 function getRequestedTrackQueriesForPlan(message, route = {}, routeQueries = []) {
   const extracted = extractRequestedTrackQueries(message);
   if (extracted.length) return extracted;
-  if (!mentionsSpecificTrackRequest(message)) return [];
+  if (!shouldUseRouteQueryFallbackForRequestedTracks(message)) return [];
 
   const values = [];
   if (route?.search) values.push(route.search);
   values.push(...routeQueries);
 
-  return [...new Set(values.map(cleanRequestedTrackQuery).filter(Boolean))].slice(0, 4);
+  return normalizeRequestedTrackQueries(values).slice(0, 4);
 }
 
-function mentionsSpecificTrackRequest(message) {
+function shouldUseRouteQueryFallbackForRequestedTracks(message) {
   const text = normalizeSearchText(message);
-  return containsAny(text, ["想听", "这首歌", "这歌", "单独搜索", "指定", "加进去", "加入", "没看见", "没有看见", "在哪里", "在哪"]);
+  return containsAny(text, ["这首歌", "这首", "这歌", "单独搜索", "指定", "加进去", "加入", "加到", "没看见", "没有看见", "在哪里", "在哪"]);
 }
 
 async function createRoutedChatResponse(message, state, tasteContext, route) {
@@ -2718,10 +2828,12 @@ async function buildTasteContext(state, conversation = [], clientContext = {}) {
 
 async function resolveRecommendedTracks(plan, state, limit = CHAT_RECOMMENDATION_LIMIT, options = {}) {
   const recommendationContext = buildRecommendationFilterContext(state, options.tasteContext);
-  const requestedTracks = await resolveRequestedTrackCandidates(plan, state, Math.min(limit, CHAT_RECOMMENDATION_LIMIT), {
-    ...options,
-    recommendationContext,
-  });
+  const requestedTracks = options.skipRequestedTracks
+    ? []
+    : await resolveRequestedTrackCandidates(plan, state, Math.min(limit, CHAT_RECOMMENDATION_LIMIT), {
+        ...options,
+        recommendationContext,
+      });
 
   if (plan.exactTrackOnly) return requestedTracks.slice(0, limit);
 
@@ -3490,16 +3602,16 @@ function extractRequestKeywords(message) {
   const raw = String(message || "");
   const values = [];
   values.push(...extractRequestedTrackQueries(raw));
-  const artistMatch = raw.match(/([\p{L}\p{N}·・]{2,20})的(?:其他)?(?:歌|歌曲|作品)/u);
-  if (artistMatch?.[1]) {
-    values.push(artistMatch[1], `${artistMatch[1]} 其他歌曲`, `${artistMatch[1]} 相似歌曲`);
+
+  for (const match of raw.matchAll(/([\p{L}\p{N}·・]{2,30})的(?:其他)?(?:歌|歌曲|作品)/gu)) {
+    const artist = cleanArtistRequestKeyword(match[1]);
+    if (artist) values.push(artist, `${artist} 经典歌曲`, `${artist} 相似歌曲`);
   }
 
   values.push(...raw
-    .split(/[\s,，。.!?！？、/]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length >= 2 && item.length <= 24)
-    .filter((item) => !/^(推荐|几首|其他|类似|歌曲|歌手|给我|帮我|来点|放点)$/u.test(item)));
+    .split(/[,，。.!?！？、/]+/)
+    .map(cleanRecommendationSearchQuery)
+    .filter(Boolean));
 
   return [...new Set(values)].slice(0, 8);
 }
@@ -3509,33 +3621,109 @@ function extractRequestedTrackQueries(message) {
   const values = [];
   const patterns = [
     /[《「『“"]([^《》「」『』“”"]{2,50})[》」』”"]/gu,
-    /想听(?:的)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌|在里面|在哪里|在哪|也加|加进|加入|加到|$)/gu,
+    /想听(?:的)?\s*([^，。！？,.!?]{2,120})/gu,
     /(?:单独)?(?:搜索|搜|找)(?:一下|出来)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌|$)/gu,
     /(?:把|将)?\s*([^，。！？,.!?]{2,50}?)(?:这首歌|这首|这歌)?\s*(?:也)?(?:加进|加入|加到)/gu,
   ];
 
   for (const pattern of patterns) {
     for (const match of raw.matchAll(pattern)) {
-      const title = cleanRequestedTrackQuery(match[1]);
-      if (title) values.push(title);
+      for (const candidate of splitRequestedTrackSegment(match[1])) {
+        const title = cleanRequestedTrackQuery(candidate);
+        if (title) values.push(title);
+      }
     }
   }
 
-  return [...new Set(values)].slice(0, 4);
+  return normalizeRequestedTrackQueries(values).slice(0, 4);
 }
 
 function cleanRequestedTrackQuery(value) {
   let text = String(value || "")
+    .replace(/(?:不要|别|不想|不用|不需要).*/u, "")
     .replace(/^(?:我想听的?|想听的?|帮我|给我|请|麻烦|单独|搜索|搜|找|把|将|另外|顺便|可以|能不能|能帮我)+/u, "")
-    .replace(/(?:这首歌|这首|这歌|歌曲|歌|在哪里|在哪|在里面|里面|也|加进去|加进来|加入|加到|出来|吗|呢|啊|吧)+$/u, "")
+    .replace(/(?:这首歌|这首|这歌|歌曲|在哪里|在哪|在里面|里面|也|加进去|加进来|加入|加到|出来|吗|呢|啊|吧)+$/u, "")
     .trim();
 
   text = text.replace(/^[的\s]+|[的\s]+$/gu, "").trim();
   const normalized = normalizeSearchText(text);
   if (normalized.length < 2 || normalized.length > 40) return "";
   if (/^(推荐|歌单|通勤歌单|歌曲|搜索|单独搜索|播放|添加|加入|可以欢快一点)$/u.test(text)) return "";
+  if (!isSafeRequestedTrackQuery(text)) return "";
   if (QUERY_MODIFIER_TERMS.has(normalized)) return "";
   return text;
+}
+
+function splitRequestedTrackSegment(value) {
+  const cleaned = String(value || "")
+    .replace(/(?:不要|别|不想|不用|不需要).*/u, "")
+    .replace(/([A-Za-z0-9\)])和(?=[A-Za-z0-9\(])/gu, "$1|TRACK_SPLIT|");
+  const parts = cleaned.split(/(?:\|TRACK_SPLIT\||以及|还有|再来|、)/u);
+  const result = [];
+
+  for (const part of parts) {
+    const item = part.trim();
+    if (!item) continue;
+    if (/^(?:一些|几首|几支|经典|更多|其他|类似|相似|同类)/u.test(item)) break;
+    if (/(?:的歌|的歌曲|的作品|歌单|主题)$/u.test(item)) break;
+    result.push(item);
+  }
+
+  return result.length ? result : [value];
+}
+
+function normalizeRequestedTrackQueries(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(cleanRequestedTrackQuery)
+    .filter(Boolean)
+    .filter(isSafeRequestedTrackQuery))];
+}
+
+function isSafeRequestedTrackQuery(value) {
+  const text = String(value || "").trim();
+  const normalized = normalizeSearchText(text);
+  if (normalized.length < 2 || normalized.length > 40) return false;
+  if (/[，。！？,.!?]/u.test(text)) return false;
+  if (/(?:来一期|歌单|不要|不想|不用|不需要|重复|一些|几首|几支|主题|更多|其他|相似|类似|的歌|的歌曲|的作品|歌手|艺人)/u.test(text)) return false;
+  if (/(?:以及|还有|再来)/u.test(text)) return false;
+  if (!/[A-Za-z0-9]/.test(text) && /[了啦呀]$/u.test(text)) return false;
+  if (/^(?:a|an|and|the|with|feat|ft)$/i.test(text)) return false;
+  return !QUERY_MODIFIER_TERMS.has(normalized);
+}
+
+function cleanArtistRequestKeyword(value) {
+  let text = String(value || "").trim();
+  const parts = text.split(/(?:以及|还有|顺便|另外|再来|想听|播放|推荐)/u).map((item) => item.trim()).filter(Boolean);
+  if (parts.length) text = parts.at(-1);
+  text = text
+    .replace(/^(?:一些|几首|几支|经典的?|更多|其他|类似|相似)+/u, "")
+    .replace(/(?:经典|歌曲|作品|歌手)$/u, "")
+    .trim();
+  return cleanRecommendationSearchQuery(text);
+}
+
+function cleanRecommendationSearchQuery(value) {
+  let text = String(value || "")
+    .replace(/(?:不要|别|不想|不用|不需要).*/u, "")
+    .replace(/^(?:我想听|想听|来一期|来点|放点|播放|推荐|帮我|给我|请|麻烦|找一下|找|搜索|一些)+/u, "")
+    .replace(/(?:吧|吗|呢|啊)$/u, "")
+    .trim();
+
+  text = text.replace(/^[的\s]+|[的\s]+$/gu, "").trim();
+  if (/^(?:看了|听了|刚看|刚听)/u.test(text)) return "";
+  if (!/[A-Za-z0-9]/.test(text)) text = text.replace(/了$/u, "").trim();
+  return isUsableRecommendationQuery(text) ? text : "";
+}
+
+function isUsableRecommendationQuery(value) {
+  const text = String(value || "").trim();
+  const normalized = normalizeSearchText(text);
+  if (normalized.length < 2 || normalized.length > 60) return false;
+  if (/(?:不要|不想|不用|不需要|重复歌曲|不要重复|别重复|不重复)/u.test(text)) return false;
+  if (/(?:和.+(?:以及|还有)|(?:以及|还有).*(?:的歌|歌曲|歌单|重复))/u.test(text)) return false;
+  if (/^(?:和|以及|还有|一些|几首|几支|其他|更多|类似|相似|经典|歌曲|歌)$/u.test(text)) return false;
+  if (/^(?:a|an|and|the|with|feat|ft)$/i.test(text)) return false;
+  return true;
 }
 
 function isExactTrackSearchRequest(message) {
@@ -4361,12 +4549,23 @@ function normalizePlan(plan, message, clientContext = {}) {
   const mood = ["focus", "chill", "energy", "sleep", "random"].includes(plan?.mood)
     ? plan.mood
     : fallback.mood;
+  const requestedTrackQueries = normalizeRequestedTrackQueries(plan?.requestedTrackQueries);
   const seedQueries = normalizeSeedQueries(plan?.seedQueries, plan?.queue, plan?.search || fallback.search);
   const queue = seedQueries.length
     ? seedQueries.map((item) => item.query)
     : Array.isArray(plan?.queue)
       ? plan.queue.slice(0, 8).map(String)
       : fallback.queue;
+  const scene = buildRecommendationScene(message, clientContext);
+  if (requestedTrackQueries.length || seedQueries.length) {
+    scene.keywords = [
+      ...new Set([
+        ...requestedTrackQueries,
+        ...seedQueries.map((item) => item.query),
+        ...(scene.keywords || []),
+      ].map(cleanRecommendationSearchQuery).filter(Boolean)),
+    ].slice(0, 16);
+  }
 
   return {
     intent,
@@ -4378,7 +4577,10 @@ function normalizePlan(plan, message, clientContext = {}) {
     queue,
     avoid: Array.isArray(plan?.avoid) ? plan.avoid.slice(0, 12).map(String) : [],
     voice: Boolean(plan?.voice),
-    scene: buildRecommendationScene(message, clientContext),
+    requestedTrackQueries,
+    playlistSearchQuery: cleanRecommendationSearchQuery(plan?.playlistSearchQuery),
+    exactTrackOnly: Boolean(plan?.exactTrackOnly),
+    scene,
   };
 }
 
