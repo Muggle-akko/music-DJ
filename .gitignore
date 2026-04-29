@@ -4,3 +4,4 @@ node_modules/
 *.err
 data/state.json
 data/listening-profile.json
+data/tts/
