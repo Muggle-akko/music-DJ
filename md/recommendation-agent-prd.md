@@ -1,8 +1,8 @@
 # Awudio 推荐系统 V2：供开发 Agent 执行的 PRD
 
-状态：工程实现已接入、本地试用中；连续收听与个人体验验收尚未完成。详见 [实施与验收记录](./recommendation-v2-implementation.md)。  
-日期：2026-10-16。代码基线：`3e8f56c`。  
-适用范围：当前本地、单用户 Awudio，继续使用 Node 服务、网易云适配服务、现有 DeepSeek/OpenAI 配置。  
+状态：工程实现已接入、本地试用中；连续收听与个人体验验收尚未完成。详见 [实施与验收记录](./recommendation-v2-implementation.md)。
+日期：2026-10-16。代码基线：`3e8f56c`。
+适用范围：当前本地、单用户 Awudio，继续使用 Node 服务、网易云适配服务、现有 DeepSeek/OpenAI 配置。
 本文是下一轮推荐改造的实施依据；旧文档 `ai-recommendation-design.md` 只作 V1 历史参考。若冲突，以本文的 V2 目标为准。
 
 ## 1. 要解决的核心问题

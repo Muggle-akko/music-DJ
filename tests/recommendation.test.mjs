@@ -920,3 +920,27 @@ test("undo queued during a feedback upload flushes immediately after its acknowl
     globalThis.window = previousWindow;
   }
 });
+
+test("strict soundtrack requests cannot be filled with unrelated familiar songs", async () => {
+  const r = await run("只听原神原声，推荐3首");
+  assert.equal(
+    r.plan.hardConstraints.find((c) => c.field === "theme").value[0],
+    "原神"
+  );
+  assert.equal(r.tracks.length, 0);
+});
+test("strict soundtrack membership needs title or album evidence", () => {
+  const plan = localIntent("只听原神主题曲");
+  const ctx = {
+    now: fixedNow,
+    learning: { tracks: {} },
+    currentIds: new Set(),
+    sessionIds: new Set(),
+  };
+  const t = candidate(
+    { ...rawSong(1), al: { id: 3, name: "原神-珍珠之歌" } },
+    { source: "search" },
+    ctx
+  );
+  assert.equal(rejectReason(t, plan, ctx), null);
+});
