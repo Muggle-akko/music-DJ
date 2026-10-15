@@ -4,18 +4,27 @@ import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
+import { createNcmClient, accountKey } from "./lib/ncm.mjs";
+import { createProfileSync } from "./lib/taste/profile-sync.mjs";
+import { createEventStore } from "./lib/taste/events.mjs";
+import { createPlayability, classifyUrl } from "./lib/recommendation/playability.mjs";
+import { createModel } from "./lib/recommendation/model.mjs";
+import { createTraceStore } from "./lib/recommendation/trace.mjs";
+import { recommend } from "./lib/recommendation/orchestrator.mjs";
+import { atomicJson, readJson } from "./lib/storage.mjs";
 
 const ROOT = resolve(".");
 loadEnvFile(resolve(ROOT, ".env"));
 
 const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = resolve(ROOT, "public");
-const DATA_DIR = resolve(ROOT, "data");
-const STATE_FILE = resolve(DATA_DIR, "state.json");
-const STATE_BACKUP_FILE = resolve(DATA_DIR, "state.backup.json");
+const DATA_DIR = process.env.AWUDIO_DATA_DIR ? resolve(process.env.AWUDIO_DATA_DIR) : resolve(ROOT, "data");
+let STATE_FILE = resolve(DATA_DIR, "state.json");
+let STATE_BACKUP_FILE = resolve(DATA_DIR, "state.backup.json");
 const LISTENING_PROFILE_FILE = resolve(DATA_DIR, "listening-profile.json");
 const TTS_CACHE_DIR = resolve(DATA_DIR, "tts");
 let stateWriteQueue = Promise.resolve();
+const stateReadBases = new WeakMap();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
@@ -57,6 +66,29 @@ const HOST_INTRO_LYRIC_GAP_MIN_MS = 12000;
 const HOST_INTRO_LYRIC_EDGE_PADDING_MS = 2500;
 const HOST_INTRO_COMMENT_TRACK_LIMIT = 8;
 const HOST_INTRO_COMMENT_MAX_PER_TRACK = 3;
+
+const RECOMMENDER_VERSION = process.env.RECOMMENDER_VERSION === "v2" ? "v2" : "v1";
+const ncmV2 = createNcmClient({ baseUrl: NCM_API_BASE, cookie: NCM_COOKIE });
+const profileSync = createProfileSync({ dataDir: DATA_DIR, ncm: ncmV2 });
+const listeningEvents = createEventStore({ dataDir: DATA_DIR });
+const playabilityV2 = createPlayability({ ncm: ncmV2 });
+const traceStore = createTraceStore(DATA_DIR);
+const recommendationModel = createModel({ provider: AI_PROVIDER, deepseekKey: DEEPSEEK_API_KEY, deepseekBase: DEEPSEEK_BASE_URL, deepseekModel: DEEPSEEK_MODEL, openaiKey: OPENAI_API_KEY, openaiModel: OPENAI_MODEL });
+const activeRecommendations = new Map();
+let identityCache = null;
+let firstSyncAttempted = false;
+
+async function getV2Identity(required = false) {
+  if (identityCache && identityCache.expiresAt > Date.now()) return identityCache;
+  try {
+    const identity = await profileSync.identity();
+    identityCache = { ...identity, authenticated: true, expiresAt: Date.now() + 60000 };
+    return identityCache;
+  } catch (error) {
+    if (required) throw error;
+    return { authenticated: false, accountKey: accountKey(createHash('sha256').update(NCM_COOKIE || 'anonymous').digest('hex')) };
+  }
+}
 
 const QUERY_MODIFIER_TERMS = new Set([
   "ai",
@@ -123,6 +155,7 @@ const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -288,6 +321,24 @@ const HOST_INTRO_INSTRUCTIONS = [
 await mkdir(DATA_DIR, { recursive: true });
 await mkdir(TTS_CACHE_DIR, { recursive: true });
 
+// Select account-specific application state before accepting requests. The first
+// account adopts the legacy state; later accounts start isolated without deleting it.
+const startupIdentity = await getV2Identity();
+if (startupIdentity.authenticated) {
+  const legacyFile = resolve(DATA_DIR, 'state.json');
+  const accountDir = resolve(DATA_DIR, 'accounts', startupIdentity.accountKey);
+  await mkdir(accountDir, { recursive: true });
+  const legacy = await readJson(legacyFile);
+  const target = resolve(accountDir, 'state.json');
+  if (legacy && !legacy.ownerAccountKey) {
+    legacy.ownerAccountKey = startupIdentity.accountKey;
+    await atomicJson(legacyFile, legacy, true);
+  }
+  if (!existsSync(target) && legacy?.ownerAccountKey === startupIdentity.accountKey) await atomicJson(target, legacy);
+  STATE_FILE = target;
+  STATE_BACKUP_FILE = resolve(accountDir, 'state.backup.json');
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -315,6 +366,37 @@ server.listen(PORT, () => {
 });
 
 async function routeApi(req, res, url) {
+  if (req.method === "POST" && url.pathname === "/api/profile/sync") {
+    await getV2Identity(true);
+    sendJson(res, 202, { ok: true, ...profileSync.start() });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/profile/status") {
+    const identity = await getV2Identity();
+    const profile = await profileSync.read(identity.accountKey);
+    sendJson(res, 200, { ok: true, ...profileSync.status(), authenticated: identity.authenticated, accountKey: identity.accountKey, coverage: profile?.dataCoverage || null, updatedAt: profile?.updatedAt || null, complete: Boolean(profile?.complete), stale: !profile || Date.now() - Date.parse(profile.updatedAt) > 86400000 });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/listening/events") {
+    const identity = await getV2Identity(true);
+    const body = await readJsonBody(req);
+    await listeningEvents.migrate(identity.accountKey, await readState());
+    const result = await listeningEvents.ingest(identity.accountKey, body.events);
+    // Only a validated, actually started playback session updates now-playing.
+    const accepted = new Set(result.accepted);
+    const started = (body.events || []).filter(event => accepted.has(event.eventId) && event.type === 'play_start').at(-1);
+    if (started) await mutateState(state => { state.plays = [...state.plays, { ...compactTrack(started.track || {}), at: started.occurredAt }].slice(-120); state.now = { ...normalizeQueueTrack({ ...started.track, id: started.trackId }), mood: started.context?.scene || 'random', playbackSessionId: started.playbackSessionId, startedAt: started.occurredAt }; });
+    sendJson(res, 200, { ok: true, ...result });
+    return;
+  }
+  const explanationMatch = url.pathname.match(/^\/api\/recommendations\/([\w-]{1,100})\/explanation$/);
+  if (req.method === "GET" && explanationMatch) {
+    const identity = await getV2Identity();
+    const trace = await traceStore.read(identity.accountKey, explanationMatch[1]);
+    const track = trace?.final?.find(t => t.id === url.searchParams.get('trackId'));
+    sendJson(res, track ? 200 : 404, { ok: Boolean(track), explanation: track?.reasonSummary || '没有找到这首歌的历史推荐依据。' });
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/api/config") {
     sendJson(res, 200, {
       ok: true,
@@ -334,6 +416,8 @@ async function routeApi(req, res, url) {
         browserFallback: false,
       },
       mode: AI_PROVIDER === "local" ? "local-fallback" : AI_PROVIDER,
+      recommenderVersion: RECOMMENDER_VERSION,
+      recommenderV2Available: true,
       serverBuild: "awudio-server-v12",
       features: {
         queue: true,
@@ -359,7 +443,7 @@ async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/queue") {
     const state = await readState();
     const queueState = normalizeQueueState(state.queue, state.queueCurrentIndex);
-    sendJson(res, 200, { ok: true, ...queueState, updatedAt: state.queueUpdatedAt || null });
+    sendJson(res, 200, { ok: true, ...queueState, revision: state.queueRevision || 0, updatedAt: state.queueUpdatedAt || null });
     return;
   }
 
@@ -379,15 +463,15 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/queue") {
     const body = await readJsonBody(req);
     const queueState = normalizeQueueState(body.queue, body.currentIndex);
-    const state = await readState();
-
-    state.queue = queueState.queue;
-    state.queueCurrentIndex = queueState.currentIndex;
-    state.queueUpdatedAt = new Date().toISOString();
-    state.updatedAt = state.queueUpdatedAt;
-    await writeState(state);
-
-    sendJson(res, 200, { ok: true, ...queueState, updatedAt: state.queueUpdatedAt });
+    const saved = await mutateState(state => {
+      state.queue = queueState.queue;
+      state.queueCurrentIndex = queueState.currentIndex;
+      state.queueUpdatedAt = new Date().toISOString();
+      state.queueRevision = (state.queueRevision || 0) + 1;
+      state.updatedAt = state.queueUpdatedAt;
+      return { updatedAt: state.queueUpdatedAt, revision: state.queueRevision };
+    });
+    sendJson(res, 200, { ok: true, ...queueState, ...saved });
     return;
   }
 
@@ -509,7 +593,7 @@ async function routeApi(req, res, url) {
       return;
     }
 
-    const payload = await createDjChatResponse(message, conversation, { mode, limit, clientContext });
+    const payload = await createDjChatResponse(message, conversation, { mode, limit, clientContext, ...recommendationRequestOptions(body, req, res) });
     sendJson(res, 200, payload);
     return;
   }
@@ -527,7 +611,7 @@ async function routeApi(req, res, url) {
       return;
     }
 
-    await streamDjChatResponse(res, message, conversation, { mode, limit, clientContext });
+    await streamDjChatResponse(res, message, conversation, { mode, limit, clientContext, ...recommendationRequestOptions(body, req, res) });
     return;
   }
 
@@ -535,39 +619,21 @@ async function routeApi(req, res, url) {
     const body = await readJsonBody(req);
     const action = String(body.action || "");
     const track = body.track || {};
-    const state = await readState();
-    const scene = buildFeedbackScene(body.scene, body.clientContext, state.now);
-    const feedbackTrack = compactFeedbackTrack(track);
-
-    if (action === "like") {
-      state.tasteProfile.liked.push(compactTrack(track));
-      state.tasteProfile.liked = dedupeTracks(state.tasteProfile.liked).slice(-60);
-    }
-
-    if (action === "dislike") {
-      state.tasteProfile.disliked.push(compactTrack(track));
-      state.tasteProfile.disliked = dedupeTracks(state.tasteProfile.disliked).slice(-60);
-    }
-
-    if (["dislike", "skip", "remove"].includes(action)) {
-      state.tasteProfile.negativeFeedback.push({
-        action,
-        scene,
-        track: feedbackTrack,
-        at: new Date().toISOString(),
-      });
-      state.tasteProfile.negativeFeedback = state.tasteProfile.negativeFeedback.slice(-160);
-    }
-
-    if (action === "play") {
-      state.plays.push({ ...compactTrack(track), at: new Date().toISOString() });
-      state.plays = state.plays.slice(-120);
-    }
-
-    updateScenePreference(state, action, feedbackTrack, scene);
-    state.updatedAt = new Date().toISOString();
-    await writeState(state);
-    sendJson(res, 200, { ok: true, tasteProfile: state.tasteProfile });
+    const tasteProfile = await mutateState(state => {
+      if (action === "like") {
+        state.tasteProfile.liked = dedupeTracks([...state.tasteProfile.liked, compactTrack(track)]).slice(-120);
+      } else if (action === "unlike") {
+        state.tasteProfile.liked = state.tasteProfile.liked.filter(item => String(item.id) !== String(track.id));
+      } else if (action === "dislike") {
+        state.tasteProfile.disliked = dedupeTracks([...state.tasteProfile.disliked, compactTrack(track)]).slice(-60);
+      } else if (action === "undo_dislike") {
+        state.tasteProfile.disliked = state.tasteProfile.disliked.filter(item => String(item.id) !== String(track.id));
+      }
+      // Legacy play/remove/skip do not carry enough evidence for V2 learning.
+      state.updatedAt = new Date().toISOString();
+      return state.tasteProfile;
+    });
+    sendJson(res, 200, { ok: true, tasteProfile, legacy: true });
     return;
   }
 
@@ -588,21 +654,12 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/taste/library") {
     const body = await readJsonBody(req);
     const tracks = Array.isArray(body.tracks) ? body.tracks : [];
-    const state = await readState();
-    const normalized = normalizeLikedLibrary(tracks);
-
-    state.tasteProfile.likedLibrary = dedupeTracks(normalized).slice(0, MAX_LIKED_LIBRARY);
-    state.tasteProfile.liked = dedupeTracks([
-      ...state.tasteProfile.liked,
-      ...normalized.map(compactTrack),
-    ]).slice(-120);
-    state.updatedAt = new Date().toISOString();
-    await writeState(state);
-
-    sendJson(res, 200, {
-      ok: true,
-      likedLibraryCount: state.tasteProfile.likedLibrary.length,
+    const count = await mutateState(state => {
+      state.tasteProfile.likedLibrary = dedupeTracks(normalizeLikedLibrary(tracks)).slice(0, MAX_LIKED_LIBRARY);
+      state.updatedAt = new Date().toISOString();
+      return state.tasteProfile.likedLibrary.length;
     });
+    sendJson(res, 200, { ok: true, likedLibraryCount: count });
     return;
   }
 
@@ -803,6 +860,7 @@ async function streamDjChatResponse(res, message, conversation, requestOptions =
     writeStreamEvent(res, "status", { text: "读取本地对话和听歌偏好" });
 
     const payload = await createDjChatResponse(message, conversation, {
+      ...requestOptions,
       assistantPrefix,
       mode,
       limit,
@@ -822,6 +880,7 @@ async function streamDjChatResponse(res, message, conversation, requestOptions =
 }
 
 async function createDjChatResponse(message, conversation = [], options = {}) {
+  if ((options.algorithmVersion || RECOMMENDER_VERSION) === 'v2') return createV2ChatResponse(message, conversation, options);
   const mode = normalizeChatMode(options.mode);
   const limit = normalizeRecommendationLimit(options.limit, mode);
   const state = await readState();
@@ -992,6 +1051,74 @@ async function createDjChatResponse(message, conversation = [], options = {}) {
       music: getTrackSource(tracks),
     },
   };
+}
+
+function recommendationRequestOptions(body, req, res) {
+  const clientId = String(body.clientId || 'local').slice(0, 160);
+  const controller = new AbortController();
+  activeRecommendations.get(clientId)?.abort();
+  activeRecommendations.set(clientId, controller);
+  res.once('close', () => { controller.abort(); if (activeRecommendations.get(clientId) === controller) activeRecommendations.delete(clientId); });
+  return { algorithmVersion: body.algorithmVersion === 'v2' ? 'v2' : body.algorithmVersion === 'v1' ? 'v1' : RECOMMENDER_VERSION,
+    requestId: String(body.requestId || '').slice(0, 100), expectedQueueRevision: body.expectedQueueRevision,
+    signal: controller.signal, agentRerank: process.env.RECOMMENDER_AGENT_RERANK !== 'false' };
+}
+
+async function createV2ChatResponse(message, conversation, options) {
+  const state = await readState();
+  const identity = await getV2Identity();
+  if (identity.authenticated) await listeningEvents.migrate(identity.accountKey, state);
+  const profile = await profileSync.read(identity.accountKey);
+  if (!profile && identity.authenticated && !firstSyncAttempted) { firstSyncAttempted = true; profileSync.start(); }
+  const learning = await listeningEvents.summary(identity.accountKey);
+  const result = await recommend({ message, options, state, profile, learning, accountKey: identity.accountKey, ncm: ncmV2,
+    model: recommendationModel, playability: playabilityV2, traceStore, featureCache: profileSync, signal: options.signal, onStatus: options.onStatus });
+  if (options.signal?.aborted) throw new DOMException('已取消', 'AbortError');
+  const plan = { ...result.plan, scene: { mood: result.plan.mood, stages: result.plan.stages }, reason: '根据本次需求、真实候选与可靠偏好选曲', say: '', voice: result.plan.voiceRequested };
+  let assistantText;
+  let control = null;
+  if (result.nonRecommendation) {
+    if (plan.intent === 'explain') {
+      const track = state.now;
+      const trace = track?.recommendationId ? await traceStore.read(identity.accountKey, track.recommendationId) : null;
+      assistantText = trace?.final?.find(t => t.id === track.id)?.reasonSummary || '这首歌没有可查询的历史推荐依据。';
+    } else if (plan.intent === 'library_query') assistantText = profile ? `偏好库当前有 ${profile.allLikedSongs.length} 首收藏，${profile.complete ? '已完整同步' : '同步尚不完整'}。播放榜只是部分样本。` : '偏好库尚未同步，可以点击“同步偏好”。';
+    else if (plan.intent === 'control') { control = /下一首/.test(message) ? 'next' : /上一首/.test(message) ? 'previous' : /继续/.test(message) ? 'play' : /清空/.test(message) ? 'clear' : 'pause'; assistantText = '已交给播放器处理。'; }
+    else if (plan.intent === 'feedback') { control = 'not_now'; assistantText = '记住了，这首歌暂时不适合当前场景，会保留你的长期喜欢。'; }
+    else {
+      const taste = await buildTasteContext(state, conversation, normalizeClientContext(options.clientContext));
+      const response = await createInformationalChatResponse(message, state, taste, options.clientContext || {}, 'music_chat');
+      assistantText = response.assistantText;
+    }
+  } else assistantText = result.tracks.length ? `这次选了 ${result.tracks.length} 首符合要求、可完整播放的歌。${result.warnings.length ? `\n${result.warnings.join('；')}。` : ''}` : `这次没有找到满足要求且可完整播放的歌曲，保留现有队列。${result.warnings.join('；')}`;
+  if (result.tracks.length && result.selectionSummary?.stages?.some(stage => stage.targetDurationMs)) {
+    const stages = result.selectionSummary.stages.map(stage => `${stage.label.replace(/[，,]$/, '')}：约 ${Math.round(stage.actualDurationMs / 60000)} 分钟`);
+    assistantText += `\n${stages.join(' → ')}。`;
+  }
+  if (plan.voiceRequested && result.tracks.length) {
+    result.tracks[0].hostIntro = { startAtMs: 0, displayText: `这一段从《${result.tracks[0].title}》开始。${result.tracks[0].reasonSummary}。`,
+      estimatedDurationMs: 12000, status: TTS_PROVIDER === 'none' ? 'unavailable' : 'pending', provider: TTS_PROVIDER, placement: 'opening', moodIntent: plan.mood };
+  }
+  let radioHistoryItem = null;
+  const createdAt = new Date().toISOString();
+  const currentRevision = (await readState()).queueRevision || 0;
+  if (options.expectedQueueRevision !== undefined && options.expectedQueueRevision !== currentRevision && ['replace','append'].includes(plan.queueAction)) {
+    plan.queueAction = 'cards';
+    result.warnings.push('生成期间队列发生变化，结果作为卡片保留');
+  }
+  await mutateState(latest => {
+    if (options.signal?.aborted) return;
+    latest.messages = normalizeConversationMessages([...latest.messages, { role: 'user', text: message, at: createdAt }, { role: 'assistant', text: assistantText, at: createdAt }], 40);
+    if (plan.queueAction === 'replace' && result.tracks.length) {
+      radioHistoryItem = createRadioHistoryItem({ message, plan, tracks: result.tracks, assistantText, source: { brain: recommendationModel ? AI_PROVIDER : 'local-fallback', music: 'netease', tts: TTS_PROVIDER }, createdAt });
+      latest.radioHistory = normalizeRadioHistory([radioHistoryItem, ...latest.radioHistory]);
+    }
+    latest.updatedAt = createdAt;
+  });
+  return { ...result, trace: undefined, ok: true, plan, control, requestId: options.requestId,
+    expectedQueueRevision: options.expectedQueueRevision,
+    mode: plan.queueAction === 'replace' ? 'playlist' : 'chat', limit: plan.requestedCount, radioHistoryItem, assistantText,
+    source: { brain: recommendationModel ? AI_PROVIDER : 'local-fallback', music: 'netease' } };
 }
 
 function buildDjReply(plan, tracks, options = {}) {
@@ -5055,6 +5182,8 @@ async function getSongUrlDetails(id) {
           code: item.code || data?.code || 200,
           br: item.br || 0,
           type: item.type || "",
+          qualification: classifyUrl(item),
+          rawDurationMs: Number(item.time || 0),
           message: "",
         };
       }
@@ -5077,6 +5206,11 @@ async function getSongUrlDetails(id) {
 async function streamNcmTrack(req, res, url) {
   const id = url.searchParams.get("id") || "";
   const details = await getSongUrlDetails(id);
+
+  if (url.searchParams.get('full') === '1' && details.qualification?.state !== 'full') {
+    sendJson(res, 409, { ok: false, error: '当前完整播放资格已变化，请重试或换一首', state: details.qualification?.state || 'unknown' });
+    return;
+  }
 
   if (!details.url) {
     sendJson(res, 404, {
@@ -5221,10 +5355,10 @@ async function ncmFetch(path, params = {}) {
 
   if (NCM_COOKIE) headers.Cookie = NCM_COOKIE;
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   const data = await response.json();
 
-  if (!response.ok) {
+  if (!response.ok || (data?.code && ![0, 200].includes(Number(data.code)))) {
     throw new Error(data?.message || `NCM HTTP ${response.status}`);
   }
 
@@ -5241,6 +5375,8 @@ function mapNcmSong(song) {
     provider: "netease",
     title: song.name || "Untitled",
     artist: artists.map((artist) => artist.name).filter(Boolean).join(" / ") || "Unknown",
+    artistIds: artists.map(artist => String(artist.id || "")).filter(Boolean),
+    albumId: String(album.id || ""),
     album: album.name || "",
     cover,
     duration: song.duration || song.dt || 0,
@@ -5428,11 +5564,28 @@ async function readJsonBody(req) {
 async function readState() {
   try {
     const raw = await readFile(STATE_FILE, "utf8");
-    return mergeState(JSON.parse(raw));
-  } catch {
+    const state = mergeState(JSON.parse(raw));
+    stateReadBases.set(state, structuredClone(state));
+    return state;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
     await writeState(DEFAULT_STATE);
     return structuredClone(DEFAULT_STATE);
   }
+}
+
+async function mutateState(mutator) {
+  const job = stateWriteQueue.catch(() => {}).then(async () => {
+    let state;
+    try { state = mergeState(JSON.parse(await readFile(STATE_FILE, 'utf8'))); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; state = structuredClone(DEFAULT_STATE); }
+    const result = await mutator(state);
+    state.schemaVersion = Math.max(2, state.schemaVersion || 0);
+    await writeStateAtomic(state);
+    return result;
+  });
+  stateWriteQueue = job;
+  return job;
 }
 
 async function writeState(state) {
@@ -5458,10 +5611,13 @@ async function mergeProtectedStateForWrite(nextState) {
 
   try {
     const currentState = mergeState(JSON.parse(await readFile(STATE_FILE, "utf8")));
-    return {
-      ...nextState,
-      radioHistory: mergeRadioHistoryForWrite(nextState.radioHistory, currentState.radioHistory),
-    };
+    const base = stateReadBases.get(nextState);
+    const merged = { ...currentState };
+    for (const [key, value] of Object.entries(nextState)) {
+      if (!base || JSON.stringify(value) !== JSON.stringify(base[key])) merged[key] = value;
+    }
+    merged.radioHistory = mergeRadioHistoryForWrite(nextState.radioHistory, currentState.radioHistory);
+    return merged;
   } catch {
     return nextState;
   }
@@ -5728,7 +5884,9 @@ function normalizeIsoDate(value) {
 async function readListeningProfile() {
   try {
     const raw = await readFile(LISTENING_PROFILE_FILE, "utf8");
-    return JSON.parse(raw);
+    const profile = JSON.parse(raw);
+    if (profile.accountKey && profile.accountKey !== (await getV2Identity()).accountKey) return createEmptyListeningProfile();
+    return profile;
   } catch {
     const profile = createEmptyListeningProfile();
     await writeFile(LISTENING_PROFILE_FILE, JSON.stringify(profile, null, 2), "utf8");
@@ -5789,6 +5947,20 @@ function normalizeLikedLibrary(tracks) {
     : [];
 }
 
+function recommendationMetadata(track = {}) {
+  return {
+    recommendationId: /^[\w-]{1,100}$/.test(track.recommendationId || '') ? track.recommendationId : null,
+    stageId: String(track.stageId || '').slice(0, 40),
+    recommendationScene: String(track.recommendationScene || '').slice(0, 40),
+    reasonSummary: String(track.reasonSummary || '').slice(0, 240),
+    evidenceIds: Array.isArray(track.evidenceIds) ? track.evidenceIds.slice(0, 20).map(id => String(id).slice(0, 120)) : [],
+    familiarity: ['familiar', 'adjacent', 'discovery', 'unknown'].includes(track.familiarity) ? track.familiarity : 'unknown',
+    artistIds: Array.isArray(track.artistIds) ? track.artistIds.map(String).filter(id => /^\d+$/.test(id)).slice(0, 20) : [],
+    playability: track.playability && ['full','preview','blocked','unknown'].includes(track.playability.state)
+      ? { state: track.playability.state, checkedAt: String(track.playability.checkedAt || '').slice(0, 40), reasonCode: String(track.playability.reasonCode || '').slice(0, 80) } : null,
+  };
+}
+
 function normalizeQueueTrack(track) {
   if (!track || typeof track !== "object") return null;
 
@@ -5799,6 +5971,7 @@ function normalizeQueueTrack(track) {
   if (!id && !title) return null;
 
   return {
+    ...recommendationMetadata(track),
     id,
     provider: String(track.provider || "unknown").slice(0, 40),
     title,
