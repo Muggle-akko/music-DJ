@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#000000">
+    <title>Awudio - AI 音乐播放器</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/fonts/google-fonts.css">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="label">个人 AI 电台</p>
+          <div class="brand">AWUDIO</div>
+        </div>
+        <div class="signal-strip" aria-label="系统状态">
+          <span id="brainStatus">[大脑: 本地]</span>
+          <span id="sourceValue">[来源: 演示]</span>
+          <span id="moodValue">[心情: 随机]</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="player-panel" aria-label="播放器">
+          <div class="panel-heading">
+            <div class="context-strip" aria-label="日期与天气">
+              <span id="dateInfo">--</span>
+              <span id="weekendInfo">--</span>
+              <span id="weatherInfo">天气: 获取中</span>
+            </div>
+            <span id="playState">[空闲]</span>
+          </div>
+
+          <div class="hero-block">
+            <h1 id="clockDisplay">00:00</h1>
+            <p id="trackInfo">等待推荐或搜索</p>
+          </div>
+
+          <div class="meter-row">
+            <span id="currentTime">00:00</span>
+            <div class="segments" id="progressSegments" aria-label="播放进度" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+            <span id="duration">--:--</span>
+          </div>
+
+          <audio id="audio"></audio>
+
+          <div class="controls" aria-label="播放控制">
+            <button class="icon-button" id="prevButton" type="button" aria-label="上一首" title="上一首">
+              <svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#skip-back"></use></svg>
+            </button>
+            <button class="icon-button icon-button-primary" id="playButton" type="button" aria-label="播放" title="播放">
+              <svg id="playIcon" class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#play-fill"></use></svg>
+            </button>
+            <button class="icon-button" id="nextButton" type="button" aria-label="下一首" title="下一首">
+              <svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#skip-forward"></use></svg>
+            </button>
+            <button class="control-button icon-toggle-button" id="likeButton" type="button" aria-label="喜欢" title="喜欢">
+              <svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#heart"></use></svg>
+            </button>
+            <button class="mode-button icon-toggle-button is-active" id="modeButton" type="button" aria-label="列表循环，点击切换" title="列表循环">
+              <svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#repeat-once"></use></svg>
+            </button>
+            <div class="volume-control" aria-label="音量控制">
+              <button class="mute-button" id="muteButton" type="button" aria-label="静音" title="静音"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#speaker-high"></use></svg></button>
+              <div class="volume-pixels" id="volumePixels" role="group">
+                <button type="button" data-volume="0.1" aria-label="音量 10"></button>
+                <button type="button" data-volume="0.2" aria-label="音量 20"></button>
+                <button type="button" data-volume="0.3" aria-label="音量 30"></button>
+                <button type="button" data-volume="0.4" aria-label="音量 40"></button>
+                <button type="button" data-volume="0.5" aria-label="音量 50"></button>
+                <button type="button" data-volume="0.6" aria-label="音量 60"></button>
+                <button type="button" data-volume="0.7" aria-label="音量 70"></button>
+                <button type="button" data-volume="0.8" aria-label="音量 80"></button>
+                <button type="button" data-volume="0.9" aria-label="音量 90"></button>
+                <button type="button" data-volume="1" aria-label="音量 100"></button>
+              </div>
+              <span id="volumeValue">70%</span>
+            </div>
+          </div>
+
+          <div class="lyric-card" id="hostIntro" aria-live="polite">
+            <span id="hostIntroTime">LYRIC</span>
+            <div class="lyric-lines" id="hostIntroText">暂无歌词</div>
+          </div>
+
+          <div class="host-caption-card" id="hostCaption" aria-live="polite">
+            <div class="host-avatar" aria-hidden="true">
+              <span>Faye</span>
+            </div>
+            <div class="host-caption-main">
+              <div class="host-caption-meta">
+                <span id="hostCaptionState">Faye</span>
+                <span id="hostCaptionTimer">--:--</span>
+              </div>
+              <div class="host-caption-lines" id="hostCaptionText"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="request-panel" aria-label="找歌工作区">
+          <div class="tabs workspace-tabs" role="tablist" aria-label="找歌方式">
+            <button class="tab-button is-active" id="aiTab" type="button" role="tab" aria-selected="true" aria-controls="aiPane">AI 电台</button>
+            <button class="tab-button" id="searchTab" type="button" role="tab" aria-selected="false" aria-controls="searchPane" tabindex="-1">搜歌曲</button>
+            <button class="tab-button" id="playlistTab" type="button" role="tab" aria-selected="false" aria-controls="playlistPane" tabindex="-1">我的歌单</button>
+          </div>
+          <div class="tab-pane is-active" id="aiPane" role="tabpanel" aria-labelledby="aiTab">
+            <div class="chat-toolbar">
+              <button class="round-icon-button" id="clearAiChatButton" type="button" aria-label="新对话" title="新对话"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#chat-circle"></use></svg></button>
+              <button class="workspace-action" id="generatePlaylistButton" type="button" title="生成歌单并替换播放队列"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#sparkle"></use></svg><span>生成歌单</span></button>
+            </div>
+            <p class="view-hint">生成歌单会替换队列，普通对话可继续聊。</p>
+            <div class="chat-history" id="aiChatHistory" aria-live="polite" aria-label="AI 对话记录"></div>
+            <p class="view-status" id="aiStatus" role="status"></p>
+            <form class="chat-composer" id="aiComposer">
+              <div class="chat-input-shell"><textarea id="aiInput" rows="1" spellcheck="false" placeholder="告诉我你现在想听什么" aria-label="点歌需求"></textarea></div>
+              <button class="round-icon-button" id="sendAiButton" type="submit" aria-label="发送" title="发送"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#paper-plane-tilt"></use></svg></button>
+            </form>
+          </div>
+          <div class="tab-pane" id="searchPane" role="tabpanel" aria-labelledby="searchTab" hidden>
+            <form class="search-row" id="searchForm">
+              <input id="searchInput" type="search" placeholder="搜索歌曲、歌手" aria-label="搜索歌曲或歌手" autocomplete="off" spellcheck="false">
+              <button class="round-icon-button" id="searchButton" type="submit" aria-label="搜索" title="搜索"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#magnifying-glass"></use></svg></button>
+            </form>
+            <p class="view-hint">找一首想听的，播放或加入队尾。</p>
+            <div class="result-header"><span id="searchSay">搜索音乐</span><span id="searchResultCount"></span></div>
+            <p class="view-status" id="searchReason" role="status">输入歌名或歌手开始搜索。</p>
+            <div class="content-scroll" id="searchScroll"><ol id="searchResultsList" class="result-list"></ol></div>
+          </div>
+          <div class="tab-pane" id="playlistPane" role="tabpanel" aria-labelledby="playlistTab" hidden>
+            <div class="account-row"><span id="neteaseAccount">账号: 检查中</span><button class="round-icon-button" id="loadPlaylistsButton" type="button" aria-label="刷新歌单" title="刷新歌单"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button></div>
+            <div class="playlist-library-view" id="playlistLibraryView">
+              <div class="result-header"><span>网易云歌单</span><span id="playlistCount"></span></div>
+              <p class="view-status" id="playlistSay" role="status">正在准备你的歌单。</p>
+              <div class="content-scroll" id="playlistLibraryScroll"><ol id="playlistList" class="playlist-list"></ol><button class="load-more-button" id="morePlaylistsButton" type="button" hidden>加载更多歌单</button></div>
+            </div>
+            <div class="playlist-detail-view" id="playlistDetailView" hidden>
+              <button class="back-button" id="playlistBackButton" type="button"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-left"></use></svg><span>我的歌单</span></button>
+              <div class="detail-heading"><div class="playlist-summary" id="playlistSummary"></div><button class="round-icon-button" id="refreshTracksButton" type="button" title="刷新歌单内容" aria-label="刷新歌单内容"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button></div>
+              <div class="playlist-batch-actions"><button class="workspace-action" id="playPlaylistButton" type="button" disabled><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#play-fill"></use></svg>播放全部</button><button class="workspace-action secondary" id="addPlaylistButton" type="button" disabled><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#queue"></use></svg>全部加入队列</button></div>
+              <p class="view-hint" id="playlistBatchHint">播放全部会替换队列；批量操作包含已加载的可播歌曲。</p>
+              <div class="result-header"><span>歌曲</span><span id="playlistTrackCount"></span></div>
+              <p class="view-status" id="playlistReason" role="status"></p>
+              <div class="content-scroll" id="playlistDetailScroll"><ol id="playlistTracksList" class="result-list"></ol><button class="load-more-button" id="moreTracksButton" type="button" hidden>加载更多歌曲</button></div>
+            </div>
+          </div>
+          <p class="workspace-notice" id="workspaceNotice" role="status"></p>
+        </section>
+
+        <section class="queue-panel" aria-label="播放队列">
+          <div class="panel-heading">
+            <p class="label" id="queueHeading">播放队列</p>
+            <span id="queueCount">00 / 200</span>
+          </div>
+          <div class="queue-tabs" role="tablist" aria-label="播放列表">
+            <button class="queue-tab-button is-active" id="queueTab" type="button" role="tab" aria-selected="true">播放队列</button>
+            <button class="queue-tab-button" id="likedTab" type="button" role="tab" aria-selected="false">我喜欢</button>
+            <button class="queue-tab-button" id="historyTab" type="button" role="tab" aria-selected="false">历史电台</button>
+          </div>
+          <p class="view-hint" id="queueHint">按顺序播放，点击歌曲旁的播放按钮即可切歌。</p>
+          <ol id="queueList" class="queue-list"></ol>
+          <div class="pager" aria-label="队列分页">
+            <button class="control-button" id="queuePrevPage" type="button">上一页</button>
+            <span id="queuePageInfo">第 1 / 1 页</span>
+            <button class="control-button" id="queueNextPage" type="button">下一页</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

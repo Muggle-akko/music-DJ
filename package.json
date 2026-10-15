@@ -1,0 +1,16 @@
+{
+  "name": "awudio-ai-music-player",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "profile:ncm": "node scripts/distill-ncm-profile.mjs",
+    "ncm": "npx NeteaseCloudMusicApi@latest",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
