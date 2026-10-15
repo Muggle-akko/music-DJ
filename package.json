@@ -8,7 +8,9 @@
     "start": "node server.mjs",
     "profile:ncm": "node scripts/distill-ncm-profile.mjs",
     "ncm": "npx NeteaseCloudMusicApi@latest",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "eval:recommendation": "node scripts/evaluate-recommendations.mjs",
+    "check:recommendation:live": "node scripts/check-recommendation-live.mjs"
   },
   "engines": {
     "node": ">=22"

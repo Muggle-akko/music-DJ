@@ -1,5 +1,7 @@
 # Awudio 推荐设计
 
+> 本文记录 V1 设计与历史实现，不作为当前能力完整性保证。下一轮改造以 [推荐系统 V2 Agent PRD](./recommendation-agent-prd.md) 为准；其中列出了与实际代码、当前本地数据之间的差异。
+
 ## 数据来源
 
 - `data/state.json`

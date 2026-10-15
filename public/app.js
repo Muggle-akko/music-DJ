@@ -1,3 +1,5 @@
+import { createListeningController } from "/listening.mjs";
+
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
 const aiInput = document.querySelector("#aiInput");
@@ -102,11 +104,11 @@ const PAGE_SIZE = 10;
 const SEGMENT_COUNT = 36;
 const MODE_STORAGE_KEY = "awudio.playMode.v1";
 const VOLUME_STORAGE_KEY = "awudio.volume.v1";
-const QUEUE_FALLBACK_STORAGE_KEY = "awudio.queue.fallback.v1";
-const QUEUE_LEGACY_STORAGE_KEYS = [QUEUE_FALLBACK_STORAGE_KEY, "awudio.queue.v2", "awudio.queue.v1"];
-const LIKED_STORAGE_KEY = "awudio.likedTracks.v1";
-const LIKED_TRACKS_STORAGE_KEY = "awudio.likedTrackData.v1";
-const AI_CHAT_STORAGE_KEY = "awudio.aiChat.v1";
+let QUEUE_FALLBACK_STORAGE_KEY = "awudio.queue.fallback.v1";
+let QUEUE_LEGACY_STORAGE_KEYS = [QUEUE_FALLBACK_STORAGE_KEY, "awudio.queue.v2", "awudio.queue.v1"];
+let LIKED_STORAGE_KEY = "awudio.likedTracks.v1";
+let LIKED_TRACKS_STORAGE_KEY = "awudio.likedTrackData.v1";
+let AI_CHAT_STORAGE_KEY = "awudio.aiChat.v1";
 const MAX_AI_CHAT_MESSAGES = 80;
 const CHAT_RECOMMENDATION_LIMIT = 5;
 const PLAYLIST_RECOMMENDATION_LIMIT = 30;
@@ -135,6 +137,19 @@ const HOST_CAPTION_DISPERSE_MS = 460;
 const PLAY_SVG = '<use href="/assets/phosphor.svg#play-fill"></use>';
 const PAUSE_SVG = '<use href="/assets/phosphor.svg#pause-fill"></use>';
 
+let exposureObserver = null;
+const exposedRecommendationTracks = new Set();
+const exposureCardTracks = new WeakMap();
+let audioRetryCount = 0;
+let listeningController = null;
+let queueMutationVersion = 0;
+let serverQueueRevision = 0;
+let algorithmVersion = localStorage.getItem('awudio.recommenderVersion') || 'v1';
+const eventClientId = sessionStorage.getItem('awudio.clientId') || crypto.randomUUID();
+sessionStorage.setItem('awudio.clientId', eventClientId);
+let latestRecommendationRequest = '';
+let lastFeedbackUndo = null;
+let profilePollTimer = 0;
 let queue = [];
 let currentIndex = -1;
 let currentTrack = null;
@@ -148,11 +163,11 @@ let accountUserId = "";
 let saveQueueTimer = 0;
 let playMode = localStorage.getItem(MODE_STORAGE_KEY) || "single";
 let volume = normalizeVolume(localStorage.getItem(VOLUME_STORAGE_KEY) ?? 0.7);
-let likedTrackKeys = loadLikedTrackKeys();
-let likedTracks = loadLikedTracks();
+let likedTrackKeys = new Set();
+let likedTracks = [];
 let radioHistory = [];
 let queueView = "queue";
-let aiChatMessages = loadAiChatMessages();
+let aiChatMessages = [];
 let voiceGeneration = 0;
 let activeVoiceTask = null;
 let spokenVoiceCueKeys = new Set();
@@ -195,11 +210,19 @@ async function init() {
   bindEvents();
   setPlayMode(playMode);
   setVolume(volume, { save: false });
+  await loadConfig();
+  await loadNeteaseAccount();
+  scopeBrowserStorage(accountUserId || 'guest');
+  likedTrackKeys = loadLikedTrackKeys();
+  likedTracks = loadLikedTracks();
+  aiChatMessages = loadAiChatMessages();
+  renderAiChat();
   await restoreQueue();
   await restoreLikedTracks();
-  await loadConfig();
   await loadRadioHistory({ silent: true });
-  await loadNeteaseAccount();
+  if (accountUserId) listeningController = createListeningController({ audio, getTrack: () => currentTrack, post: postJson, accountId: accountUserId, clientId: eventClientId });
+  document.querySelector('#v2Toggle').checked = algorithmVersion === 'v2';
+  void loadProfileStatus();
   loadWeatherInfo();
 
   if ("serviceWorker" in navigator) {
@@ -212,6 +235,19 @@ async function init() {
 }
 
 function bindEvents() {
+  document.querySelector('#v2Toggle').addEventListener('change', event => {
+    algorithmVersion = event.target.checked ? 'v2' : 'v1';
+    localStorage.setItem('awudio.recommenderVersion', algorithmVersion);
+    showNotice(algorithmVersion === 'v2' ? '已切换到 V2 试用：真实候选选曲与独立反馈' : '已切回 V1 推荐');
+  });
+  document.querySelector('#syncProfileButton').addEventListener('click', syncProfile);
+  document.querySelector('#undoFeedbackButton').addEventListener('click', () => {
+    if (!lastFeedbackUndo) return;
+    listeningController?.action(lastFeedbackUndo.type, lastFeedbackUndo.track, { undoOf: lastFeedbackUndo.undoOf });
+    lastFeedbackUndo = null;
+    document.querySelector('#undoFeedbackButton').hidden = true;
+    showNotice('已撤销这次反馈');
+  });
   aiTab.addEventListener("click", () => activateTab("ai"));
   searchTab.addEventListener("click", () => activateTab("search"));
   playlistTab.addEventListener("click", () => activateTab("playlists"));
@@ -311,7 +347,6 @@ function bindEvents() {
     updateHostIntroDisplay();
     maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
-    void sendTaste("play");
   });
   audio.addEventListener("pause", () => {
     stopSpectrumMeter();
@@ -328,6 +363,19 @@ function bindEvents() {
   });
   audio.addEventListener("ended", handleEnded);
   audio.addEventListener("error", () => {
+    if (currentTrack?.recommendationId && audioRetryCount < 1) {
+      audioRetryCount++;
+      const failedTrack = currentTrack;
+      const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+      setPlayState('[重新检查音源]', false);
+      setTimeout(async () => {
+        if (currentTrack !== failedTrack) return;
+        audio.src = `${failedTrack.url}&retry=${Date.now()}`;
+        audio.addEventListener('loadedmetadata', () => { if (currentTrack === failedTrack && resumeAt > 0) audio.currentTime = resumeAt; }, { once: true });
+        try { await audio.play(); } catch { showNotice('音源仍不可用，可以重试或换一首'); }
+      }, 300);
+      return;
+    }
     stopSpectrumMeter();
     cancelVoicePipeline({ immediateRestore: true });
     setPlayState("[音源错误]", false);
@@ -345,6 +393,7 @@ function bindEvents() {
 
 async function loadConfig() {
   const data = await getJson("/api/config");
+  if (!localStorage.getItem('awudio.recommenderVersion')) algorithmVersion = data.recommenderVersion || 'v1';
   brainStatus.textContent =
     data.aiProvider === "local" ? "[大脑: 本地规则]" : `[大脑: ${data.aiModel}]`;
   sourceValue.textContent = data.ncm ? "[来源: 网易云]" : "[来源: 演示]";
@@ -522,16 +571,15 @@ async function generateAiPlaylist() {
 }
 
 async function streamDjResponse(message, assistantMessageId, conversation, options = {}) {
+  const requestId = crypto.randomUUID();
+  latestRecommendationRequest = requestId;
+  options = { ...options, requestId, queueMutationVersion };
+  const requestPayload = { message, conversation, mode: options.mode || 'chat', limit: options.limit || CHAT_RECOMMENDATION_LIMIT,
+    clientContext: getClientContext(), algorithmVersion, clientId: eventClientId, requestId, expectedQueueRevision: serverQueueRevision };
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      conversation,
-      mode: options.mode || "chat",
-      limit: options.limit || CHAT_RECOMMENDATION_LIMIT,
-      clientContext: getClientContext(),
-    }),
+    body: JSON.stringify(requestPayload),
   });
 
   if (!response.ok) {
@@ -540,13 +588,7 @@ async function streamDjResponse(message, assistantMessageId, conversation, optio
   }
 
   if (!response.body) {
-    const data = await postJson("/api/chat", {
-      message,
-      conversation,
-      mode: options.mode || "chat",
-      limit: options.limit || CHAT_RECOMMENDATION_LIMIT,
-      clientContext: getClientContext(),
-    });
+    const data = await postJson("/api/chat", requestPayload);
     applyDjResponse(data, assistantMessageId, options);
     return;
   }
@@ -621,10 +663,14 @@ function getClientContext() {
 }
 
 function applyDjResponse(data, assistantMessageId, options = {}) {
+  if (options.requestId && options.requestId !== latestRecommendationRequest) return;
+  const isV2 = data.algorithmVersion === 'v2';
+  const staleQueue = options.queueMutationVersion !== undefined && options.queueMutationVersion !== queueMutationVersion;
   aiResults = data.tracks || [];
   const text = data.assistantText || buildClientDjReply(data.plan, aiResults);
   const mode = options.mode || data.mode || "chat";
-  const chatTracks = mode === "chat" ? summarizeChatTracks(aiResults, CHAT_RECOMMENDATION_LIMIT) : [];
+  const chatTracks = mode === "chat" || staleQueue || isV2 ? summarizeChatTracks(aiResults, isV2 ? 30 : CHAT_RECOMMENDATION_LIMIT) : [];
+
 
   updateAiChatMessage(assistantMessageId, text, {
     status: "done",
@@ -636,9 +682,17 @@ function applyDjResponse(data, assistantMessageId, options = {}) {
   if (data.radioHistoryItem) {
     upsertRadioHistoryItem(data.radioHistoryItem);
   }
-  if (options.replaceQueue || mode === "playlist") {
-    replaceQueueWithTracks(aiResults);
-  }
+  if (isV2) {
+    if (data.control === 'next') playNext();
+    else if (data.control === 'previous') playPrevious();
+    else if (data.control === 'pause') audio.pause();
+    else if (data.control === 'play' && (audio.paused || !audio.currentSrc)) void togglePlay();
+    else if (data.control === 'not_now') recordFeedback('not_now', currentTrack);
+    else if (data.control === 'clear') { while (queue.length) removeQueueItem(queue.length - 1); }
+    if (staleQueue && ['replace','append'].includes(data.plan?.queueAction)) showNotice('生成期间队列有变化，结果已保留在对话中，未覆盖队列');
+    else if (data.plan?.queueAction === 'replace' && aiResults.length) replaceQueueWithTracks(aiResults);
+    else if (data.plan?.queueAction === 'append') addPlayableTracks(aiResults);
+  } else if ((options.replaceQueue || mode === "playlist") && !staleQueue) replaceQueueWithTracks(aiResults);
 }
 
 function buildClientDjReply(plan, tracks) {
@@ -853,10 +907,12 @@ async function togglePlay() {
 }
 
 async function playTrack(index) {
+  audioRetryCount = 0;
   if (index < 0 || !queue[index] || !isPlayable(queue[index])) return;
 
   cancelVoicePipeline({ immediateRestore: true });
   spokenVoiceCueKeys = new Set();
+  listeningController?.load(queue[index]);
   currentIndex = index;
   currentTrack = queue[index];
   syncQueuePageToCurrent();
@@ -901,7 +957,7 @@ function playPrevious() {
 
 function playNext() {
   if (!queue.length) return;
-  if (shouldRecordSkip()) void sendTaste("skip");
+  listeningController?.skip();
   const nextIndex =
     playMode === "shuffle" ? findRandomPlayableIndex(currentIndex) : findNextPlayableIndex(currentIndex);
   if (nextIndex !== -1) playTrack(nextIndex);
@@ -909,14 +965,16 @@ function playNext() {
 
 function handleEnded() {
   cancelVoicePipeline({ immediateRestore: true });
+  listeningController?.complete();
   if (playMode === "single") return;
   stopSpectrumMeter();
-  void sendTaste("complete");
-  playNext();
+  const nextIndex = playMode === "shuffle" ? findRandomPlayableIndex(currentIndex) : findNextPlayableIndex(currentIndex);
+  if (nextIndex !== -1) void playTrack(nextIndex);
 }
 
 async function sendTaste(action, track = currentTrack) {
   if (!track) return;
+  listeningController?.action(action, track);
 
   try {
     await postJson("/api/taste", { action, track, clientContext: getClientContext() });
@@ -943,7 +1001,7 @@ function likeTrack(track) {
   if (currentTrack && trackKey(currentTrack) === trackKey(track)) {
     void sendTaste("like");
   } else {
-    void postJson("/api/taste", { action: "like", track, clientContext: getClientContext() }).catch(() => {});
+    void sendTaste("like", track);
   }
   renderQueue();
   updateLikeButton();
@@ -990,7 +1048,7 @@ function removeLikedTrack(track, options = {}) {
   saveLikedTracks();
   persistLikedTracks();
   if (options.sendTaste) {
-    void postJson("/api/taste", { action: "remove", track, clientContext: getClientContext() }).catch(() => {});
+    void sendTaste("unlike", track);
   }
   renderQueue();
   updateLikeButton();
@@ -1079,7 +1137,7 @@ function normalizeAiChatMessages(messages) {
             at: message?.at || new Date().toISOString(),
             status: ["streaming", "done", "error"].includes(message?.status) ? message.status : "done",
             tracks: Array.isArray(message?.tracks)
-              ? message.tracks.filter(isPlayable).map(normalizeClientTrack).slice(0, CHAT_RECOMMENDATION_LIMIT)
+              ? message.tracks.filter(isPlayable).map(normalizeClientTrack).slice(0, PLAYLIST_RECOMMENDATION_LIMIT)
               : [],
           };
         })
@@ -1181,6 +1239,7 @@ function resizeAiInput() {
 }
 
 function renderAiChat() {
+  exposureObserver?.disconnect();
   aiChatHistory.innerHTML = "";
 
   if (!aiChatMessages.length) {
@@ -1235,6 +1294,11 @@ function renderAiChat() {
 
         card.querySelector(".track-play").addEventListener("click", () => playResultTrack(track));
         card.querySelector("[data-add-track]").addEventListener("click", () => addPlayableTracks([track]));
+        if (track.recommendationId) {
+          const why = document.createElement('button'); why.type = 'button'; why.className = 'recommendation-why'; why.textContent = '为什么推荐';
+          why.addEventListener('click', () => explainTrack(track)); card.append(why);
+        }
+        observeRecommendationCard(card, track);
         trackList.append(card);
       }
       content.append(trackList);
@@ -1337,7 +1401,7 @@ function removeQueueItem(index) {
   renderQueue();
   refreshResultActions();
   persistQueue();
-  if (removedTrack) void sendTaste("remove", removedTrack);
+  if (removedTrack) listeningController?.action("queue_remove", removedTrack);
 }
 
 function renderCurrentTrack() {
@@ -2220,6 +2284,9 @@ function renderQueue() {
         </button>
         <div class="queue-menu" hidden>
           <button type="button" data-action="next">下一首播放</button>
+          <button type="button" data-action="not-now">现在不合适</button>
+          <button type="button" data-action="dislike">不喜欢</button>
+          <button type="button" data-action="explain">为什么推荐</button>
           <button type="button" data-action="like">${isLiked ? "取消喜欢" : "喜欢"}</button>
           <button type="button" data-action="remove">${queueView === "liked" ? "移出喜欢" : "删除"}</button>
         </div>
@@ -2227,6 +2294,7 @@ function renderQueue() {
     `;
     item.querySelector(".track-play").addEventListener("click", () => queueView === "liked" ? playResultTrack(track) : playTrack(index));
     item.querySelector('[data-action="next"]').addEventListener("click", () => scheduleNextTrack(track));
+    bindFeedbackMenu(item, track);
     item.addEventListener("dblclick", () => {
       if (queueView === "liked") {
         playLikedTrack(track);
@@ -2353,11 +2421,12 @@ function renderResults(listElement, countElement, tracks, unit = "首") {
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
       <div class="queue-actions"><button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!playable}" aria-label="加入队列" title="加入队列" ${playable ? "" : "disabled"}>${icon("queue")}</button>
       <button class="menu-button" type="button" aria-label="更多操作" title="更多操作" aria-expanded="false" ${playable ? "" : "disabled"}>${icon("dots-three")}</button>
-      <div class="queue-menu" hidden><button type="button" data-action="next">下一首播放</button></div></div>`;
+      <div class="queue-menu" hidden><button type="button" data-action="next">下一首播放</button><button type="button" data-action="not-now">现在不合适</button><button type="button" data-action="dislike">不喜欢</button><button type="button" data-action="explain">为什么推荐</button></div></div>`;
     item.querySelector(".track-play").addEventListener("click", () => playResultTrack(track));
     item.querySelector("[data-add-track]").addEventListener("click", () => addPlayableTracks([track]));
     item.querySelector(".menu-button").addEventListener("click", event => { event.stopPropagation(); toggleQueueMenu(item); });
     item.querySelector('[data-action="next"]').addEventListener("click", () => scheduleNextTrack(track));
+    bindFeedbackMenu(item, track);
     listElement.append(item);
   });
   refreshResultActions();
@@ -2807,6 +2876,14 @@ function dedupeTracks(tracks) {
 
 function normalizeClientTrack(track) {
   return {
+    recommendationId: track.recommendationId || null,
+    stageId: String(track.stageId || ''),
+    recommendationScene: String(track.recommendationScene || ''),
+    reasonSummary: String(track.reasonSummary || ''),
+    evidenceIds: Array.isArray(track.evidenceIds) ? track.evidenceIds : [],
+    familiarity: track.familiarity || 'unknown',
+    artistIds: Array.isArray(track.artistIds) ? track.artistIds : [],
+    playability: track.playability || null,
     id: String(track.id || ""),
     provider: String(track.provider || "unknown"),
     title: String(track.title || ""),
@@ -2892,6 +2969,7 @@ function trackKey(track) {
 }
 
 function persistQueue() {
+  queueMutationVersion++;
   clearTimeout(saveQueueTimer);
   saveQueueTimer = window.setTimeout(() => {
     void saveQueue();
@@ -2900,7 +2978,8 @@ function persistQueue() {
 
 async function saveQueue() {
   try {
-    await postJson("/api/queue", { queue, currentIndex });
+    const saved = await postJson("/api/queue", { queue, currentIndex });
+    serverQueueRevision = saved.revision || serverQueueRevision;
     saveQueueFallback();
   } catch {
     saveQueueFallback();
@@ -2910,6 +2989,7 @@ async function saveQueue() {
 async function restoreQueue() {
   try {
     const data = await getJson("/api/queue");
+    serverQueueRevision = data.revision || 0;
     queue = Array.isArray(data.queue) ? data.queue.filter(isPlayable).map(normalizeClientTrack).slice(0, MAX_QUEUE) : [];
     currentIndex = Number.isInteger(data.currentIndex) ? data.currentIndex : resolvePlayableIndex(queue);
     if (currentIndex >= queue.length || currentIndex < -1) currentIndex = resolvePlayableIndex(queue);
@@ -3097,4 +3177,73 @@ function escapeHtml(value) {
     };
     return entities[char];
   });
+}
+
+async function loadProfileStatus() {
+  try {
+    const data = await getJson('/api/profile/status');
+    const node = document.querySelector('#profileStatus');
+    node.textContent = data.state === 'running' ? `正在同步偏好，已取得 ${data.fetched || 0} 首…` : data.state === 'error' ? `同步失败：${data.error}` : data.coverage ? `偏好库 ${data.coverage.fetchedLikedTrackCount}/${data.coverage.likedPlaylistDeclaredTrackCount} 首${data.complete ? '' : '（部分）'} · 播放榜为部分样本${data.stale ? ' · 可更新' : ''}` : '偏好库尚未同步，可先同步收藏。';
+    document.querySelector('#syncProfileButton').disabled = data.state === 'running';
+    clearTimeout(profilePollTimer);
+    if (data.state === 'running') profilePollTimer = setTimeout(loadProfileStatus, 2000);
+  } catch { document.querySelector('#profileStatus').textContent = '暂时无法读取偏好库状态'; }
+}
+async function syncProfile() {
+  const button = document.querySelector('#syncProfileButton'); button.disabled = true;
+  try { await postJson('/api/profile/sync', {}); await loadProfileStatus(); }
+  catch (error) { showNotice(`同步失败：${error.message}`); button.disabled = false; }
+}
+function bindFeedbackMenu(item, track) {
+  item.querySelector('[data-action="not-now"]')?.addEventListener('click', () => recordFeedback('not_now', track));
+  item.querySelector('[data-action="dislike"]')?.addEventListener('click', () => recordFeedback('dislike', track));
+  item.querySelector('[data-action="explain"]')?.addEventListener('click', () => explainTrack(track));
+}
+function recordFeedback(type, track) {
+  if (!track || !listeningController) { showNotice('网易云登录后才可保存推荐反馈'); return; }
+  const eventId = listeningController.action(type, track);
+  lastFeedbackUndo = { type: type === 'dislike' ? 'undo_dislike' : 'undo_not_now', track, undoOf: eventId };
+  document.querySelector('#undoFeedbackButton').hidden = false;
+  showNotice(type === 'dislike' ? '已标记不喜欢，后续推荐会屏蔽这首歌；可以撤销' : '已标记现在不合适，不影响长期喜欢；可以撤销');
+  closeQueueMenus();
+}
+async function explainTrack(track) {
+  closeQueueMenus();
+  if (!track.recommendationId) { showNotice('这首歌没有可查询的推荐记录'); return; }
+  try { const data = await getJson(`/api/recommendations/${encodeURIComponent(track.recommendationId)}/explanation?trackId=${encodeURIComponent(track.id)}`); showNotice(data.explanation); }
+  catch { showNotice(track.reasonSummary || '没有找到这首歌的历史推荐依据'); }
+}
+
+function scopeBrowserStorage(accountId) {
+  const ownerKey = 'awudio.legacyStorageOwner';
+  const owner = localStorage.getItem(ownerKey);
+  if (!owner && accountId !== 'guest') localStorage.setItem(ownerKey, accountId);
+  function scoped(key) {
+    const target = `${key}.account.${accountId}`;
+    if ((!owner || owner === accountId) && accountId !== 'guest' && !localStorage.getItem(target) && localStorage.getItem(key)) localStorage.setItem(target, localStorage.getItem(key));
+    return target;
+  }
+  QUEUE_LEGACY_STORAGE_KEYS = QUEUE_LEGACY_STORAGE_KEYS.map(scoped);
+  QUEUE_FALLBACK_STORAGE_KEY = scoped(QUEUE_FALLBACK_STORAGE_KEY);
+  LIKED_STORAGE_KEY = scoped(LIKED_STORAGE_KEY);
+  LIKED_TRACKS_STORAGE_KEY = scoped(LIKED_TRACKS_STORAGE_KEY);
+  AI_CHAT_STORAGE_KEY = scoped(AI_CHAT_STORAGE_KEY);
+}
+
+function observeRecommendationCard(card, track) {
+  if (!track.recommendationId || !('IntersectionObserver' in window)) return;
+  exposureCardTracks.set(card, track);
+  exposureObserver ||= new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting || entry.intersectionRatio < 0.5 || document.visibilityState !== 'visible') continue;
+      const song = exposureCardTracks.get(entry.target);
+      const key = `${song.recommendationId}:${song.id}`;
+      if (!exposedRecommendationTracks.has(key) && listeningController) {
+        exposedRecommendationTracks.add(key);
+        listeningController.action('exposure', song);
+      }
+      exposureObserver.unobserve(entry.target);
+    }
+  }, { threshold: 0.5 });
+  exposureObserver.observe(card);
 }

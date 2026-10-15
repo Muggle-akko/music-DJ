@@ -1,0 +1,121 @@
+// Frozen from commit 3e8f56c for an isolated V1 ranking comparison.
+function scoreProfileSong(song, { scene, plan, state, recentIds, currentQueueIds, recentRadioIds }) {
+  const text = normalizeSearchText(
+    `${song.title} ${song.artist} ${song.album} ${(song.styleTags || []).join(" ")}`,
+  );
+  const keywordMatches = scene.keywords.reduce((score, keyword) => {
+    const normalized = normalizeSearchText(keyword);
+    return score + (normalized && text.includes(normalized) ? 16 : 0);
+  }, 0);
+  const styleMatches = scene.styleHints.reduce((score, hint) => {
+    const normalized = normalizeSearchText(hint);
+    return score + (normalized && text.includes(normalized) ? 10 : 0);
+  }, 0);
+  const recentPenalty = recentIds.has(String(song.id)) ? -28 : 0;
+  const queuePenalty = currentQueueIds.has(String(song.id)) ? -18 : 0;
+  const recentRadioPenalty = recentRadioIds?.has(String(song.id)) ? -72 : 0;
+  const playScore = Math.log1p(Number(song.allTimePlayCount || 0)) * 8 + Number(song.weeklyPlayCount || 0) * 5;
+  const addedScore = scoreAddedAt(song.addedAt);
+  const eraScore = scoreEra(song, scene);
+  const moodScore = scoreMoodFit(song, scene);
+  const requestBoost = plan.search && text.includes(normalizeSearchText(plan.search)) ? 14 : 0;
+  const preferenceScore = scoreScenePreference(song, scene, state);
+
+  return 50 + keywordMatches + styleMatches + playScore + addedScore + eraScore + moodScore + requestBoost + preferenceScore + recentPenalty + queuePenalty + recentRadioPenalty;
+}
+
+function scoreAddedAt(timestamp) {
+  if (!timestamp) return 0;
+  const ageDays = (Date.now() - timestamp) / 86400000;
+  if (ageDays <= 14) return 12;
+  if (ageDays <= 90) return 7;
+  if (ageDays <= 365) return 3;
+  return 0;
+}
+
+function scoreEra(song, scene) {
+  const year = Number(song.publishYear || 0);
+  if (!year) return 0;
+  if (scene.isWeekend && year >= 1980 && year < 2010) return 5;
+  if (scene.mood === "focus" && year >= 2010) return 2;
+  return 0;
+}
+
+function scoreMoodFit(song, scene) {
+  const text = normalizeSearchText(`${song.title} ${song.artist} ${song.album} ${(song.styleTags || []).join(" ")}`);
+  let score = 0;
+
+  if (scene.mood === "focus") {
+    if (containsAny(text, ["instrumental", "ambient", "lofi", "jazz", "纯音乐", "钢琴"])) score += 14;
+    if (containsAny(text, ["dj", "dance", "disco", "rock"])) score -= 4;
+  }
+  if (scene.mood === "sleep") {
+    if (containsAny(text, ["ambient", "piano", "jazz", "acoustic", "治愈", "浪漫"])) score += 14;
+    if (containsAny(text, ["dj", "dance", "disco", "metal", "rock"])) score -= 12;
+  }
+  if (scene.mood === "energy") {
+    if (containsAny(text, ["electronic", "dance", "disco", "funk", "groove", "citypop", "citypop"])) score += 14;
+  }
+  if (scene.mood === "chill") {
+    if (containsAny(text, ["chill", "jazz", "citypop", "rnb", "r&b", "ambient", "drive"])) score += 10;
+  }
+
+  return score;
+}
+
+function scoreScenePreference(song, scene, state) {
+  const sceneKey = getScenePreferenceKey(scene);
+  const prefs = state?.tasteProfile?.scenePreferences?.[sceneKey];
+  const negative = state?.tasteProfile?.negativeFeedback || [];
+  if (!prefs && !negative.length) return 0;
+
+  const artists = splitArtistNames(song.artist).map(normalizeSearchText).filter(Boolean);
+  const tags = (song.styleTags || []).map(normalizeSearchText).filter(Boolean);
+  const trackId = String(song.id || "");
+  const title = normalizeSearchText(song.title);
+  let score = 0;
+
+  if (prefs) {
+    score += getWeightedMapScore(prefs.likedArtists, artists, 6);
+    score += getWeightedMapScore(prefs.playedArtists, artists, 2);
+    score += getWeightedMapScore(prefs.skippedArtists, artists, -8);
+    score += getWeightedMapScore(prefs.removedArtists, artists, -10);
+    score += getWeightedMapScore(prefs.likedTags, tags, 4);
+    score += getWeightedMapScore(prefs.playedTags, tags, 1.5);
+    score += getWeightedMapScore(prefs.skippedTags, tags, -5);
+    score += getWeightedMapScore(prefs.removedTags, tags, -6);
+    if (trackId && prefs.likedTracks?.[trackId]) score += Math.min(16, prefs.likedTracks[trackId] * 8);
+    if (trackId && prefs.skippedTracks?.[trackId]) score -= Math.min(30, prefs.skippedTracks[trackId] * 12);
+    if (trackId && prefs.removedTracks?.[trackId]) score -= Math.min(36, prefs.removedTracks[trackId] * 14);
+  }
+
+  for (const item of negative.slice(-80)) {
+    if (item?.scene?.key && item.scene.key !== sceneKey) continue;
+    const track = item?.track || {};
+    const sameId = trackId && track.id && String(track.id) === trackId;
+    const sameTitle = title && normalizeSearchText(track.title) === title;
+    const sameArtist = artists.some((artist) => artistMatchesAny(artist, new Set(splitArtistNames(track.artist).map(normalizeSearchText))));
+    if (sameId) score -= 18;
+    else if (sameTitle && sameArtist) score -= 12;
+    else if (sameArtist) score -= 3;
+  }
+
+  return Math.max(-48, Math.min(36, score));
+}
+
+function getScenePreferenceKey(scene = {}) {
+  const mood = ["focus", "chill", "energy", "sleep", "random"].includes(scene?.mood) ? scene.mood : "random";
+  const timeSlot = scene?.timeSlot || getTimeSlot(new Date().getHours());
+  return `${mood}:${timeSlot}`;
+}
+
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function containsAny(text, words) {
+  return words.some((word) => text.includes(word));
+}

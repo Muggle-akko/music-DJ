@@ -115,3 +115,10 @@ FISH_AUDIO_SPEED=1
 API
 POST /api/tts - 合成或读取缓存后的主播讲解音频。
 GET /api/tts/audio/:file - 读取缓存的讲解音频。
+
+
+推荐系统 V2（本地试用）
+
+在 AI 电台勾选“试用新版推荐”，点击“同步偏好”取得收藏元数据。新版使用真实网易云候选 + 有限工具调用的 AI 选曲；实际播放和明确反馈分别记录。当前保留 V1 默认值，连续收听和个人对照验收后再推广。
+
+实施说明与测试命令见 [推荐 V2 实施记录](md/recommendation-v2-implementation.md)，规格见 [Agent PRD](md/recommendation-agent-prd.md)。

@@ -111,7 +111,9 @@
               <button class="round-icon-button" id="clearAiChatButton" type="button" aria-label="新对话" title="新对话"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#chat-circle"></use></svg></button>
               <button class="workspace-action" id="generatePlaylistButton" type="button" title="生成歌单并替换播放队列"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#sparkle"></use></svg><span>生成歌单</span></button>
             </div>
-            <p class="view-hint">生成歌单会替换队列，普通对话可继续聊。</p>
+            <div class="recommendation-settings"><label class="algorithm-toggle"><input id="v2Toggle" type="checkbox">试用新版推荐</label><button class="workspace-action secondary" id="syncProfileButton" type="button">同步偏好</button><button class="workspace-action secondary" id="undoFeedbackButton" type="button" hidden>撤销反馈</button></div>
+            <p class="view-status" id="profileStatus" role="status">正在读取偏好库…</p>
+            <p class="view-hint">生成歌单会替换队列，普通推荐先展示歌曲。新版推荐目前处于试用验收阶段。</p>
             <div class="chat-history" id="aiChatHistory" aria-live="polite" aria-label="AI 对话记录"></div>
             <p class="view-status" id="aiStatus" role="status"></p>
             <form class="chat-composer" id="aiComposer">
