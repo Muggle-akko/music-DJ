@@ -4,6 +4,7 @@ export function createAgentController(adapter) {
   let streamAbort, stopped = false, lastLease = null, externalPlayback = false;
   let heartbeatRunning = false, renderKey = '', manualVersion = 0;
   let modeChanging = false, deviceChoiceDirty = false;
+  let radioHistoryKey = '';
   const pendingReceipts = new Map();
   const seenKey = 'awudio.agent.commands.v1';
   let seen;
@@ -81,6 +82,7 @@ export function createAgentController(adapter) {
     }
   }
   function render(snapshot) {
+    if (snapshot.radioHistoryKey !== radioHistoryKey) { radioHistoryKey=snapshot.radioHistoryKey; adapter.onRadioChange?.(); }
     const nextMode = snapshot.mode;
     if (mode !== nextMode) manualVersion++;
     mode = nextMode;

@@ -122,6 +122,9 @@ GET /api/tts/audio/:file - 读取缓存的讲解音频。
 
 实施说明与测试命令见 [推荐 V2 实施记录](md/recommendation-v2-implementation.md)，规格见 [Agent PRD](md/recommendation-agent-prd.md)。
 
-外部 Agent 模式（已实现首版，尚未验收）
+外部 Agent 模式
 
-在网页选择“外部 Agent”，通过本地 STDIO MCP 让 Codex 查询真实曲库、自行选歌、提交计划并控制网页播放。聊天在 Agent 中进行，外部工具路径不调用内置模型。见 [接入说明](md/external-agent-setup.md)、[外部 Agent 模式 PRD](md/external-agent-mode-prd.md)及 [音乐 Skill](skills/awudio/SKILL.md)。按用户要求，本轮暂未进行验收测试。
+在网页选择“外部 Agent”，通过本地 STDIO MCP 让 Codex 查询真实曲库、自行选歌、提交计划并控制网页播放。聊天在 Agent 中进行，外部选歌工具不调用内置模型。现已完成 Codex 连接和真实曲库歌单推荐；电台制作的验证边界见 [电台制作说明](md/radio-studio.md)。接入方式见 [接入说明](md/external-agent-setup.md)、[外部 Agent 模式 PRD](md/external-agent-mode-prd.md)及 [音乐 Skill](skills/awudio/SKILL.md)。
+## 电台制作
+
+推荐歌单和播放队列均提供“制作电台”，支持 API 或外部 Agent 生成解说、手动编辑、保存到历史电台及回听。详见 [电台制作说明](md/radio-studio.md)。

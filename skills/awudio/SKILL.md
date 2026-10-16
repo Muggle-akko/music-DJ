@@ -34,6 +34,16 @@ description: 使用 Awudio MCP 音乐工具查询真实曲库、推荐歌曲并�
 
 Agent 退出不会停止已有队列；本版本不自动唤醒 Agent 补歌。
 
+## 制作电台
+
+用户明确要制作电台、写解说或保存一期时，使用电台工具。仅推荐歌曲不自动建立或归档电台。
+
+先读取 context 及 `awudio_get_radio`。从已有推荐用 `awudio_prepare_radio(source=plan, sourceId=planId)`；从队列用 `source=queue` 并传最新 expectedQueueRevision；历史修订用 `source=history`。
+
+用 `awudio_get_radio(draftId)` 读完整曲序、revision、preferences、targetCount 与 cueContext。你自己写文案时用 `awudio_write_radio_script(mode=agent)`，传最新 expectedRevision 和 cues；用户指定内置 API 时用 mode=api。开场对应首曲、结语对应末曲，每首最多一段，其余用 transition；默认约 38% 曲目、上限 12 段，均匀分布并照顾末曲收尾。遵守当前频率及内容口吻偏好。参考 cueWindows 的位置和字数选择 startAtMs；歌词空档不是无人声保证，窗口不足会保存文字而不硬插语音。相关热评只作主观线索转述，不报用户名，不把评论当事实。音乐背景、听感线索、文化联想与陪伴角度交替，避免模板套话和重复长句。只依据已知资料或明确表述为编排考虑，避免捏造剧情、歌词、演奏细节、新闻或个人回忆。
+
+写完默认先交给用户审阅。用户已要求保存时，用 `awudio_save_radio` 归档；narration 只代表是否让已配置的语音服务朗读，不代表 Agent 已生成音频。没有语音配置就保存文字，不能假称已配音。保存成功不是播放成功。超时使用同一 operationId 查询 awudio_get_operation，不盲目重复创建。
+
 ## 反馈
 
 只记录用户明确的喜欢、不喜欢或现在不合适。队列删除不是不喜欢；场景反馈不覆盖长期喜欢。撤销传原 eventId 为 undoOf。只操作 Awudio 本地反馈，不修改网易云红心或云端歌单。

@@ -167,6 +167,26 @@ test("HTTP contracts: sync, concurrent queue/feedback, zero-result safety and me
         .duplicate,
       ["integration-event"]
     );
+    const studio=(tool,args)=>request('/api/radios/studio',{tool,args});
+    const prepared=await studio('awudio_prepare_radio',{operationId:'radio-prepare',source:'queue',expectedQueueRevision:1,title:'HTTP 电台'});
+    assert.equal(prepared.status,200);
+    const draftId=prepared.data.draft.id;
+    const written=await studio('awudio_write_radio_script',{operationId:'radio-write',draftId,expectedRevision:0,mode:'agent',preferences:{density:'sparse',content:'少报歌名，多聊转场'},cues:[{trackId:track.id,kind:'opening',startAtMs:30000,text:'这是测试电台的开场。'}]});
+    assert.equal(written.status,200);
+    const saveArgs={operationId:'radio-save',draftId,expectedRevision:1,title:'保存的电台',narration:false};
+    const saved=await studio('awudio_save_radio',saveArgs);
+    assert.equal(saved.status,200);
+    assert.equal((await studio('awudio_save_radio',saveArgs)).data.radio.id,saved.data.radio.id);
+    const history=(await request('/api/radios')).data.radios;
+    const radio=history.find(r=>r.id===saved.data.radio.id);
+    assert.equal(radio.script.cues[0].text,'这是测试电台的开场。');
+    assert.equal(radio.tracks[0].hostIntro.status,'text_only');
+    assert.equal(radio.revision,1);
+    assert.equal(radio.script.preferences.density,'sparse');
+    assert.equal(radio.tracks[0].hostIntro.startAtMs,30000);
+    assert.equal((await request('/api/queue')).data.revision,1,'制作和保存不修改队列');
+    const staleDraft=await studio('awudio_save_radio',{...saveArgs,operationId:'radio-stale'});
+    assert.equal(staleDraft.status,409);
   } finally {
     child.kill("SIGTERM");
     await once(child, "exit");

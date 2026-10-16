@@ -139,7 +139,7 @@
                 <button class="agent-example" id="agentExampleButton" type="button" title="复制示例，粘贴到你的 Agent 中"><span>推荐几首英国乐队 Bôa 的歌</span><span class="example-action">复制示例</span></button>
                 <details class="agent-setup-guide" id="agentSetupGuide"><summary>如何连接</summary><ol><li>在 Codex 的 MCP 设置中添加 Awudio。项目已提供配置：<code>config/awudio-mcp.example.toml</code></li><li>使用项目中的 Awudio 音乐 Skill，在 Agent 对话里说出需求。</li><li>推荐会先展示；告诉 Agent 播放后，这里开始放歌。</li></ol></details>
               </div>
-              <div id="agentPlans" class="agent-plans" aria-live="polite" hidden></div>
+              <div id="agentPlans" class="agent-plans" tabindex="0" role="region" aria-label="Agent 推荐歌单，可滚动浏览" aria-live="polite" hidden></div>
               <p class="agent-footer">对话留在 Agent，音乐在这里继续。</p>
             </section>
             <div id="builtinRecommendation">
@@ -197,6 +197,7 @@
             <button class="queue-tab-button" id="historyTab" type="button" role="tab" aria-selected="false">历史电台</button>
           </div>
           <p class="view-hint" id="queueHint">按顺序播放，点击歌曲旁的播放按钮即可切歌。</p>
+          <div class="radio-queue-action"><button id="makeRadioButton" type="button" class="workspace-action secondary"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#sparkle"></use></svg>制作电台</button><span>给当前队列加解说、留作回听</span></div>
           <ol id="queueList" class="queue-list"></ol>
           <div class="pager" aria-label="队列分页">
             <button class="control-button" id="queuePrevPage" type="button">上一页</button>
@@ -207,6 +208,24 @@
       </main>
     </div>
 
+    <dialog id="radioStudio" class="radio-studio" aria-labelledby="radioStudioTitle">
+      <div class="radio-studio-header"><div><p class="label">RADIO STUDIO</p><h2 id="radioStudioTitle">制作一期电台</h2><p id="radioSourceSummary" class="view-status"></p></div><button id="radioClose" class="workspace-action ghost" type="button" aria-label="关闭电台制作">关闭</button></div>
+      <div class="radio-studio-scroll">
+        <label class="radio-field">继续制作<select id="radioDraftPicker" aria-label="切换电台草稿"></select></label>
+        <label class="radio-field">电台名称<input id="radioTitle" maxlength="120" placeholder="给这段音乐起个名字"></label>
+        <details class="radio-narration-preferences"><summary>解说频率与内容偏好</summary><label class="radio-field">解说频率<select id="radioDensity"><option value="sparse">少说一点 · 约 20%</option><option value="balanced" selected>适中 · 约 38%</option><option value="frequent">多聊一点 · 约 60%</option></select></label><label class="radio-field">内容与口吻<textarea id="radioContentPreference" rows="3" maxlength="500" aria-label="解说内容偏好"></textarea></label><p class="view-status">API 与 Agent 使用同一份偏好；歌词空档只是插入候选，不能保证没有人声。没有足够窗口时保留文字解说。</p></details>
+        <section class="radio-writing" aria-labelledby="radioWritingTitle">
+          <div class="radio-writing-heading"><h3 id="radioWritingTitle">写开场与串词</h3><div class="radio-mode-switch" role="group" aria-label="解说生成方式"><button id="radioApiMode" type="button" aria-pressed="true">API 生成</button><button id="radioAgentMode" type="button" aria-pressed="false">Agent 来写</button></div></div>
+          <div id="radioApiControls"><label class="radio-field">这期想聊什么<textarea id="radioBrief" rows="2" maxlength="1000" placeholder="例如：像朋友一样聊聊音乐，少报歌名，避免剧透。"></textarea></label><button id="radioGenerate" class="workspace-action secondary" type="button">生成解说</button></div>
+          <div id="radioAgentControls" hidden><p class="view-status">把制作任务交给正在聊天的 Agent，写好后回到这里审阅。Agent 写文案与语音朗读是独立的。</p><button id="radioCopyTask" type="button" class="workspace-action secondary">复制制作任务</button></div>
+        </section>
+        <div class="radio-script-heading"><h3>曲目与解说</h3><button id="radioRefreshDraft" class="text-action" type="button">读取最新草稿</button></div>
+        <p class="view-status">点击曲目可编辑串词。留白的歌曲只放音乐，不必每首都讲。</p>
+        <div id="radioScriptList" class="radio-script-list"></div>
+        <label class="radio-narration"><input id="radioNarration" type="checkbox">回听时朗读解说</label><p class="view-status" id="radioVoiceHint"></p>
+      </div>
+      <div class="radio-studio-footer"><p id="radioStudioStatus" class="view-status" role="status"></p><button id="radioSave" type="button" class="workspace-action">保存为历史电台</button></div>
+    </dialog>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

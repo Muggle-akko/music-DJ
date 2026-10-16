@@ -1,5 +1,6 @@
 import { createListeningController } from "/listening.mjs";
 import { createAgentController } from "/agent.mjs";
+import { createRadioStudio } from "/radio.mjs";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
@@ -172,6 +173,7 @@ let volume = normalizeVolume(localStorage.getItem(VOLUME_STORAGE_KEY) ?? 0.7);
 let likedTrackKeys = new Set();
 let likedTracks = [];
 let radioHistory = [];
+let radioStudio;
 let queueView = "queue";
 let aiChatMessages = [];
 let voiceGeneration = 0;
@@ -228,9 +230,12 @@ async function init() {
   await loadRadioHistory({ silent: true });
   if (accountUserId) listeningController = createListeningController({ audio, getTrack: () => currentTrack, post: postJson, accountId: accountUserId, clientId: eventClientId });
   localStorage.removeItem('awudio.recommenderVersion');
+  radioStudio = createRadioStudio({flushQueue:flushQueueWrites,getRevision:()=>serverQueueRevision,notice:showNotice,
+    onSaved:async radio=>{upsertRadioHistoryItem(radio);await loadRadioHistory({silent:true});}});
   externalAgentController = createAgentController({ getPlayback: externalPlaybackState, flushQueue: flushQueueWrites,
     syncQueue: syncExternalQueue, syncFeedback: syncExternalFeedback, execute: executeExternalCommand, renderPlans: renderExternalPlans,
     pause: () => audio.pause(), resume: () => togglePlay(), notice: showNotice,
+    onRadioChange: () => { void loadRadioHistory({silent:true}); },
     onMode: mode => {
       if (mode === 'external') latestRecommendationRequest = '';
       brainStatus.textContent = mode === 'external' ? '[选歌: 外部 Agent]' : builtinBrainLabel;
@@ -489,6 +494,7 @@ function normalizeClientRadioItem(item) {
     introCount,
     voiceCount,
     source: item.source && typeof item.source === "object" ? item.source : {},
+    script: item.script || null,
     tracks,
   };
 }
@@ -1575,6 +1581,7 @@ function resetHostCaptionDisplay(text = getHostCaptionIdleText()) {
   clearHostCaptionIdleTimer();
   hostCaption.classList.remove("is-speaking", "is-preparing", "is-dispersing", "has-intro");
   hostCaption.classList.add("is-idle");
+  hostCaption.classList.toggle('is-text-only',Boolean(currentTrack?.hostIntro?.displayText && (currentTrack.hostIntro.provider==='none' || currentTrack.hostIntro.status==='text_only')));
   hostCaptionState.textContent = "Faye";
   hostCaptionTimer.textContent = "--:--";
   hostCaptionLineKey = "";
@@ -1586,6 +1593,12 @@ function resetHostCaptionDisplay(text = getHostCaptionIdleText()) {
 function getHostCaptionIdleText() {
   if (!currentTrack) return "等待音乐开始";
   if (!getHostIntro(currentTrack)?.displayText) return "本曲暂无解说";
+  if (getHostIntro(currentTrack).provider === 'none' || getHostIntro(currentTrack).status === 'text_only') {
+    const intro=getHostIntro(currentTrack),now=Number(audio.currentTime)*1000;
+    if(now<intro.startAtMs)return `解说将在 ${formatTime(intro.startAtMs/1000)} 展示`;
+    if(intro.windowEndMs && now>intro.windowEndMs)return '本段解说已结束';
+    return intro.displayText;
+  }
   return "等待解说时段";
 }
 
@@ -1864,6 +1877,7 @@ function maybeStartHostIntroVoice() {
 
   const intro = getHostIntro(currentTrack);
   if (!intro) return;
+  if (intro.provider === 'none' || intro.status === 'text_only') return;
 
   const currentMs = Number.isFinite(audio.currentTime) ? audio.currentTime * 1000 : 0;
   const startAtMs = Number(intro.startAtMs) || 0;
@@ -1885,6 +1899,7 @@ function scheduleHostIntroVoiceCheck() {
 
   const intro = getHostIntro(currentTrack);
   if (!intro) return;
+  if (intro.provider === 'none' || intro.status === 'text_only') return;
 
   const cueKey = getVoiceCueKey(currentTrack, intro);
   if (spokenVoiceCueKeys.has(cueKey)) return;
@@ -2361,7 +2376,7 @@ function renderRadioHistory() {
     const empty = document.createElement("li");
     empty.className = "queue-item radio-history-item is-empty";
     empty.innerHTML =
-      '<span class="queue-index">--</span><div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div><div class="queue-title"><strong>暂无历史电台</strong><span>生成推荐歌单后会保存到这里</span></div><span class="queue-duration">--</span><button class="mini-action" type="button" disabled>载入</button>';
+      '<span class="queue-index">--</span><div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div><div class="queue-title"><strong>暂无历史电台</strong><span>点击“制作电台”，保存曲目与解说</span></div><span class="queue-duration">--</span>';
     queueList.append(empty);
     return;
   }
@@ -2374,7 +2389,7 @@ function renderRadioHistory() {
       formatRadioCreatedAt(radio.createdAt),
       `${radio.trackCount || radio.tracks.length} 首`,
       `${radio.introCount || 0} 段讲解`,
-      `${radio.voiceCount || 0} 段语音`,
+      radio.script?.narration ? '回听时朗读' : '文字电台',
     ].join(" / ");
 
     item.innerHTML = `
@@ -2384,7 +2399,7 @@ function renderRadioHistory() {
         <strong>${escapeHtml(radio.title || "历史电台")}</strong>
         <span>${escapeHtml(details)}</span>
       </div>
-      <span class="queue-duration">${escapeHtml(translateMood(radio.mood || "random"))}</span>
+      <button class="text-action radio-edit-button" type="button">编辑</button>
       <button class="mini-action" type="button">载入</button>
     `;
 
@@ -2393,10 +2408,11 @@ function renderRadioHistory() {
       loadRadioHistoryItem(radio);
     });
     item.addEventListener("dblclick", () => loadRadioHistoryItem(radio));
-    item.querySelector("button").addEventListener("click", (event) => {
+    item.querySelector(".mini-action").addEventListener("click", (event) => {
       event.stopPropagation();
       loadRadioHistoryItem(radio);
     });
+    item.querySelector('.radio-edit-button').addEventListener('click',event=>{event.stopPropagation();void radioStudio.open('history',radio.id);});
     queueList.append(item);
   });
 }
@@ -2412,9 +2428,10 @@ function loadRadioHistoryItem(radio) {
   }
 
   replaceQueueWithTracks(tracks);
+  setPlayMode('list');
   moodValue.textContent = `[心情: ${translateMood(radio.mood || "random")}]`;
   sourceValue.textContent = "[来源: 历史电台]";
-  showNotice(`已载入历史电台，共 ${tracks.length} 首`);
+  showNotice(`已载入历史电台，共 ${tracks.length} 首，点击播放开始回听`);
 }
 
 function formatRadioCreatedAt(value) {
@@ -2475,6 +2492,7 @@ function updateProgress() {
   const total = Number.isFinite(audio.duration) ? audio.duration : 0;
   const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
   const ratio = total ? current / total : 0;
+  if(activeVoiceTask?.intro?.windowEndMs && current*1000>=activeVoiceTask.intro.windowEndMs)cancelVoicePipeline({immediateRestore:true});
 
   currentTime.textContent = formatTime(current);
   duration.textContent = total ? formatTime(total) : "--:--";
@@ -2900,6 +2918,7 @@ function dedupeTracks(tracks) {
 
 function normalizeClientTrack(track) {
   return {
+    radioId: track.radioId || null,
     externalPlanId: track.externalPlanId || null,
     origin: track.origin === 'external_agent' ? 'external_agent' : 'builtin',
     recommendationId: track.recommendationId || null,
@@ -2950,6 +2969,8 @@ function normalizeClientHostIntro(value) {
     enabled: value.enabled !== false,
     voiceCueId: String(value.voiceCueId || "").slice(0, 90),
     startAtMs: clampMilliseconds(value.startAtMs, 0, 0, HOST_INTRO_MAX_START_AT_MS),
+    windowEndMs:Number.isFinite(value.windowEndMs) ? value.windowEndMs : null,
+    timingSource:String(value.timingSource || 'legacy'),
     estimatedDurationMs: clampMilliseconds(
       value.estimatedDurationMs,
       estimateClientHostIntroDurationMs(displayText),
@@ -3153,15 +3174,18 @@ async function executeExternalCommand(command) {
 }
 
 function renderExternalPlans(plans, apply) {
-  const target = document.querySelector('#agentPlans'); target.replaceChildren();
+  const target = document.querySelector('#agentPlans'), scrollTop=target.scrollTop;
+  const expanded=new Set([...target.querySelectorAll('.agent-plan-reasons[open]')].map(n=>n.closest('.agent-plan').dataset.planId));
+  target.replaceChildren();
   for (const plan of plans) {
-    const article = document.createElement('article'); article.className = 'agent-plan';
+    const article = document.createElement('article'); article.className = 'agent-plan'; article.dataset.planId=plan.id;
     const title = document.createElement('h3'); title.textContent = plan.requestSummary;
     const meta = document.createElement('p'); meta.className = 'agent-plan-meta';
     const expired = Date.parse(plan.expiresAt) < Date.now();
     meta.textContent = `${plan.tracks.length} 首 · ${Math.round(plan.tracks.reduce((n, t) => n + t.duration, 0) / 60000)} 分钟${expired ? ' · 已过期' : ''}`;
     const list = document.createElement('ol'); list.className = 'agent-track-list';
     const reasons = document.createElement('details'); reasons.className = 'agent-plan-reasons';
+    reasons.open=expanded.has(plan.id);
     const reasonsTitle = document.createElement('summary'); reasonsTitle.textContent = '选曲说明'; reasons.append(reasonsTitle);
     for (const track of plan.tracks) {
       const li = document.createElement('li');
@@ -3199,10 +3223,13 @@ function renderExternalPlans(plans, apply) {
     const replaceUpcoming = document.createElement('button'); replaceUpcoming.type = 'button'; replaceUpcoming.textContent = '替换待播，保留当前歌曲';
     replaceUpcoming.disabled = expired; replaceUpcoming.addEventListener('click', () => run('replace_upcoming', 'keep'));
     menu.append(replaceUpcoming); actions.append(more); actionButtons.push(more, replaceUpcoming);
+    const makeRadio=document.createElement('button');makeRadio.type='button';makeRadio.className='workspace-action ghost';makeRadio.textContent='制作电台';
+    makeRadio.addEventListener('click',()=>{void radioStudio.open('plan',plan.id);});actions.insertBefore(makeRadio,more);
     article.append(title, meta, list);
     if (reasons.children.length > 1) article.append(reasons);
     article.append(actions, menu); target.append(article);
   }
+  target.scrollTop=scrollTop;
 }
 
 function loadQueueFallback() {

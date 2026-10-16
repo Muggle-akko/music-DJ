@@ -20,7 +20,7 @@ async function request(path, body, { signal, useSession = true } = {}) {
     if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || base.username || base.password || !data.token) throw new Error('invalid_configuration');
     configuration = { baseUrl: base.origin, token: data.token };
   }
-  const timeout = AbortSignal.timeout(path.endsWith('/call') ? 15000 : 6000);
+  const timeout = AbortSignal.timeout(body?.tool === 'awudio_write_radio_script' && body?.args?.mode === 'api' ? 95000 : path.endsWith('/call') ? 15000 : 6000);
   const response = await fetch(`${configuration.baseUrl}${path}`, { method: 'POST', redirect: 'error',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${configuration.token}`, ...(useSession && sessionId ? { 'X-Awudio-Agent-Session': sessionId } : {}) },
     body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, timeout]) : timeout });

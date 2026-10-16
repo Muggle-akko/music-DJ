@@ -2266,7 +2266,13 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
 .agent-setup-guide ol { margin:8px 0 0; padding-left:17px; font-size:11px; line-height:1.8; }
 .agent-setup-guide li { margin-bottom:8px; }
 .agent-setup-guide code { font:10px var(--font-data); overflow-wrap:anywhere; }
-.agent-plans { overflow-y:auto; min-height:0; flex:1; scrollbar-width:thin; scrollbar-color:#555 transparent; overscroll-behavior:contain; }
+.agent-plans { overflow-y:auto; overflow-x:hidden; min-height:0; min-width:0; flex:1; padding-inline-end:16px; scrollbar-gutter:stable; scrollbar-width:thin; scrollbar-color:#666 transparent; overscroll-behavior:contain; }
+.agent-plans:focus-visible { outline:1px solid #ffffff40; outline-offset:-1px; }
+.agent-plans::-webkit-scrollbar,.radio-studio-scroll::-webkit-scrollbar,.agent-empty::-webkit-scrollbar { width:8px; height:8px; }
+.agent-plans::-webkit-scrollbar-track,.radio-studio-scroll::-webkit-scrollbar-track,.agent-empty::-webkit-scrollbar-track { background:transparent; }
+.agent-plans::-webkit-scrollbar-thumb,.radio-studio-scroll::-webkit-scrollbar-thumb,.agent-empty::-webkit-scrollbar-thumb { background:#666; border:2px solid transparent; background-clip:padding-box; border-radius:8px; }
+.agent-plans::-webkit-scrollbar-thumb:hover,.radio-studio-scroll::-webkit-scrollbar-thumb:hover { background-color:#999; }
+.agent-plans::-webkit-scrollbar-button,.radio-studio-scroll::-webkit-scrollbar-button,.agent-empty::-webkit-scrollbar-button { display:none; width:0; height:0; }
 .agent-plan { padding:20px 0; border-bottom:1px solid rgba(255,255,255,.08); }
 .agent-plan h3 { margin:0 0 7px; font-size:14px; line-height:1.6; font-weight:500; overflow-wrap:anywhere; }
 .agent-plan-meta { color:var(--text-secondary); margin:0; font-size:11px; line-height:1.6; }
@@ -2297,3 +2303,46 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
   .workspace-action, .radio-mode-switch button { transition:none; }
 }
 .recommendation-why { background:transparent; border:0; padding:4px 0; color:#a2bca0; font:inherit; font-size:11px; text-align:left; cursor:pointer; grid-column:2 / -1; }
+:root { --radio-muted: rgba(255,255,255,.5); }
+.radio-queue-action { display:flex; align-items:center; gap:12px; margin:0 0 14px; flex-wrap:wrap; }
+.radio-queue-action > span { font-size:11px; color:var(--radio-muted); }
+.radio-studio { width:min(720px,calc(100vw - 32px)); max-height:calc(100dvh - 48px); padding:0; color:#eee; background:#202120; border:1px solid #444; border-radius:14px; box-shadow:0 30px 90px #0009; }
+.radio-studio[open] { display:flex; flex-direction:column; }
+.radio-studio::backdrop { background:rgba(0,0,0,.72); backdrop-filter:blur(6px); }
+.radio-studio-header { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; padding:24px 28px 20px; border-bottom:1px solid #ffffff12; }
+.radio-studio h2 { font-size:24px; letter-spacing:-.6px; margin:6px 0 8px; }
+.radio-studio h3 { font-size:14px; margin:0; }
+.radio-studio .view-status { font-size:12px; line-height:1.7; margin:6px 0; color:#aaa; }
+.radio-studio-scroll { overflow-y:auto; overflow-x:hidden; scrollbar-gutter:stable; scrollbar-width:thin; scrollbar-color:#666 transparent; overscroll-behavior:contain; padding:22px 28px; min-height:0; }
+.radio-field { display:grid; gap:9px; margin:0 0 18px; font-size:12px; color:#bbb; }
+.radio-studio input:not([type=checkbox]),.radio-studio textarea,.radio-studio select { box-sizing:border-box; width:100%; background:#ffffff06; color:#eee; border:1px solid #ffffff20; border-radius:8px; padding:10px 12px; font:inherit; line-height:1.6; }
+.radio-studio textarea { resize:vertical; min-height:72px; }
+.radio-studio input:focus-visible,.radio-studio textarea:focus-visible,.radio-studio select:focus-visible { outline:2px solid #b8c9b7; outline-offset:2px; }
+.radio-writing { padding:20px 0 24px; border-top:1px solid #ffffff12; border-bottom:1px solid #ffffff12; margin:4px 0 24px; }
+.radio-writing-heading,.radio-script-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+.radio-writing .radio-mode-switch { width:220px; flex:none; }
+.radio-script-list { margin:16px 0 24px; }
+.radio-script-item { border-bottom:1px solid #ffffff12; }
+.radio-script-item > summary { display:flex; align-items:center; gap:12px; list-style:none; padding:14px 0; cursor:pointer; }
+.radio-script-item > summary::-webkit-details-marker { display:none; }
+.radio-track-index { color:#777; font-size:12px; font-variant-numeric:tabular-nums; }
+.radio-track-name { display:grid; flex:1; min-width:0; gap:4px; }
+.radio-track-name strong { font-size:13px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.radio-track-name small { font-size:11px; color:#999; }
+.radio-cue-label { color:#9fae9e; font-size:11px; flex:none; }
+.radio-script-body { padding:0 0 18px 30px; }
+.radio-script-body select { width:auto; font-size:11px; margin-bottom:10px; padding:5px 10px; }
+.radio-script-body textarea { font-size:13px; }
+.radio-narration-preferences { margin:0 0 18px; font-size:12px; color:#bbb; }
+.radio-narration-preferences > summary { cursor:pointer; margin-bottom:14px; }
+.radio-cue-timing { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; color:#999; font-size:11px; }
+.radio-cue-timing input[type=number] { width:76px; padding:5px 8px; font-size:11px; }
+.radio-narration { display:flex; align-items:center; gap:8px; font-size:13px; }
+.radio-narration input[type=checkbox] { width:16px; height:16px; padding:0; margin:0; flex:none; accent-color:#b8c9b7; }
+.host-caption-card.is-text-only .host-caption-lines { max-height:100px; overflow:auto; }
+.host-caption-card.is-text-only .host-caption-text { white-space:normal; line-height:1.7; }
+.radio-studio-footer { padding:16px 28px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-top:1px solid #ffffff12; }
+.radio-studio-footer .view-status { flex:1; }
+.radio-studio-footer button { flex:none; }
+@media(max-width:600px) { .radio-studio { max-height:calc(100dvh - 24px); } .radio-studio-header,.radio-studio-scroll { padding:18px; } .radio-writing-heading { align-items:flex-start; flex-direction:column; } .radio-studio-footer { padding:14px 18px; flex-direction:column; align-items:stretch; gap:8px; } }
+@media(max-width:700px) { .radio-history-item { grid-template-columns:24px 40px minmax(0,1fr) auto; } .radio-history-item .mini-action { grid-column:4; grid-row:1 / span 2; margin:0; align-self:center; } .radio-history-item .radio-edit-button { grid-column:3; grid-row:2; justify-self:start; } }

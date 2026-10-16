@@ -4,4 +4,4 @@
 command = "/Users/awu/.local/share/fnm/node-versions/v24.15.0/installation/bin/node"
 args = ["/Users/awu/Documents/ChatGPT/musicdj/scripts/awudio-mcp.mjs"]
 startup_timeout_sec = 20
-tool_timeout_sec = 20
+tool_timeout_sec = 120

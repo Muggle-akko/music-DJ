@@ -13,6 +13,7 @@ import { createTraceStore } from "./lib/recommendation/trace.mjs";
 import { recommend } from "./lib/recommendation/orchestrator.mjs";
 import { atomicJson, readJson } from "./lib/storage.mjs";
 import { createAgentService } from "./lib/agent/service.mjs";
+import { createRadioService, radioTracks } from "./lib/radio.mjs";
 
 const ROOT = resolve(".");
 loadEnvFile(resolve(ROOT, ".env"));
@@ -182,7 +183,9 @@ if (startupIdentity.authenticated) {
   STATE_BACKUP_FILE = resolve(accountDir, 'state.backup.json');
 }
 
-const agentService = await createAgentService({ dataDir: DATA_DIR, port: PORT, readState, mutateState, normalizeQueueState,
+const radioService = createRadioService({ readState, mutateState, model: recommendationModel, brain: AI_PROVIDER,
+  voiceProvider: TTS_PROVIDER, ncm:ncmV2, notify: () => agentService.notify() });
+const agentService = await createAgentService({ dataDir: DATA_DIR, port: PORT, readState, mutateState, normalizeQueueState, radioService,
   getIdentity: async () => {
     const identity = await getV2Identity();
     if (identity.accountKey !== startupIdentity.accountKey) throw Object.assign(new Error('账号状态已变化，请重启音乐服务重新连接'), { status: 'unauthorized' });
@@ -221,6 +224,20 @@ server.listen(PORT, () => {
 async function routeApi(req, res, url) {
   if (await agentService.route(req, res, url, readJsonBody)) return;
   if (req.method === 'POST') agentService.guardBrowserMutation(req);
+  if (url.pathname === '/api/radios/studio' && req.method === 'POST') {
+    try {
+      const body = await readJsonBody(req);
+      if (!['awudio_prepare_radio','awudio_get_radio','awudio_write_radio_script','awudio_save_radio'].includes(body.tool)) throw Object.assign(new Error('未知电台操作'), {status:'invalid_input'});
+      const controller = new AbortController();
+      res.once('close', () => controller.abort());
+      const result = await radioService.call(body.tool, body.args, {signal:controller.signal});
+      sendJson(res, 200, {ok:true,...result});
+    } catch (error) {
+      sendJson(res, error.status === 'conflict' ? 409 : error.status === 'not_found' ? 404 : 400,
+        {ok:false,error:error.status ? error.message : '解说生成失败，请重试；原有文案和电台仍保留',status:error.status || 'unavailable'});
+    }
+    return;
+  }
   if (['/api/chat', '/api/chat/stream'].includes(url.pathname) && await agentService.isExternal()) {
     sendJson(res, 409, { ok: false, error: '外部 Agent 模式下，请在已连接的 Agent 中聊天' });
     return;
@@ -784,8 +801,13 @@ async function createV2ChatResponse(message, conversation, options) {
     assistantText += `\n${stages.join(' → ')}。`;
   }
   if (plan.voiceRequested && result.tracks.length) {
-    result.tracks[0].hostIntro = { startAtMs: 0, displayText: `这一段从《${result.tracks[0].title}》开始。${result.tracks[0].reasonSummary}。`,
-      estimatedDurationMs: 12000, status: TTS_PROVIDER === 'none' ? 'unavailable' : 'pending', provider: TTS_PROVIDER, placement: 'opening', moodIntent: plan.mood };
+    try {
+      const cues = await radioService.generateCues({tracks:result.tracks,title:message,signal:options.signal});
+      result.tracks = radioTracks({id:options.requestId || createHash('sha256').update(message).digest('hex').slice(0,20),tracks:result.tracks,cues},TTS_PROVIDER!=='none',TTS_PROVIDER);
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      assistantText += '\n解说暂未生成，歌曲已保留。可以通过“制作电台”继续写解说。';
+    }
   }
   let radioHistoryItem = null;
   const createdAt = new Date().toISOString();
@@ -830,6 +852,12 @@ function createRadioHistoryItem({ message, plan, tracks, assistantText, source, 
     introCount,
     voiceCount,
     source: normalizeRadioSource(source),
+    script: {mode:tracks.some(t=>t.hostIntro) ? 'api' : null,narration:tracks.some(t=>t.hostIntro?.provider && t.hostIntro.provider!=='none'),
+      cues:normalizedTracks.filter(t=>t.hostIntro?.displayText).map(t=>({trackId:t.id,
+        kind:['opening','intro'].includes(t.hostIntro.placement) && t.id===normalizedTracks[0]?.id ? 'opening' : ['closing','outro'].includes(t.hostIntro.placement) && t.id===normalizedTracks.at(-1)?.id ? 'closing' : 'transition',
+        text:t.hostIntro.displayText,startAtMs:t.hostIntro.startAtMs,windowEndMs:t.hostIntro.windowEndMs ?? undefined,
+        placement:['intro','interlude','outro'].includes(t.hostIntro.placement) ? t.hostIntro.placement : undefined,
+        timingSource:['lyric_gap_heuristic','unverified'].includes(t.hostIntro.timingSource) ? t.hostIntro.timingSource : undefined}))},
     tracks: normalizedTracks,
   };
 }
@@ -1800,7 +1828,13 @@ async function mergeProtectedStateForWrite(nextState) {
 }
 
 function mergeRadioHistoryForWrite(nextItems, currentItems) {
-  return normalizeRadioHistory([...(nextItems || []), ...(currentItems || [])]);
+  const byId = new Map();
+  for (const item of [...(nextItems || []), ...(currentItems || [])]) {
+    const previous=byId.get(item.id);
+    if (!previous || (item.revision || 0) > (previous.revision || 0) ||
+      (item.revision || 0) === (previous.revision || 0) && Date.parse(item.updatedAt || item.createdAt) > Date.parse(previous.updatedAt || previous.createdAt)) byId.set(item.id,item);
+  }
+  return normalizeRadioHistory([...byId.values()].sort((a,b)=>Date.parse(b.updatedAt || b.createdAt)-Date.parse(a.updatedAt || a.createdAt)));
 }
 
 function sendJson(res, status, payload) {
@@ -1911,6 +1945,7 @@ function normalizeRadioHistoryItem(item) {
 
   return {
     id: String(item.id || createRadioHistoryId({ createdAt, message: item.request || item.title || "", tracks })).slice(0, 80),
+    revision: Number.isSafeInteger(item.revision) ? item.revision : 0,
     title: String(item.title || buildRadioHistoryTitle(item.request || "", { say: item.say || "" }, createdAt)).slice(0, 120),
     createdAt,
     updatedAt: normalizeIsoDate(item.updatedAt) || createdAt,
@@ -1923,6 +1958,11 @@ function normalizeRadioHistoryItem(item) {
     introCount,
     voiceCount,
     source: normalizeRadioSource(item.source),
+    script: item.script && typeof item.script === 'object' ? {
+      mode: String(item.script.mode || '').slice(0, 30), narration: Boolean(item.script.narration),
+      preferences:item.script.preferences && typeof item.script.preferences==='object' ? {density:['sparse','balanced','frequent'].includes(item.script.preferences.density) ? item.script.preferences.density : 'balanced',content:String(item.script.preferences.content || '').slice(0,500)} : null,
+      cues: Array.isArray(item.script.cues) ? item.script.cues.slice(0,12).map(c => ({trackId:String(c.trackId),kind:String(c.kind),text:String(c.text).slice(0,600),startAtMs:c.startAtMs,placement:c.placement,windowEndMs:c.windowEndMs,timingSource:c.timingSource,fitsWindow:c.fitsWindow})) : [],
+    } : null,
     tracks,
   };
 }
@@ -1930,7 +1970,7 @@ function normalizeRadioHistoryItem(item) {
 function normalizeRadioTracks(tracks) {
   return Array.isArray(tracks)
     ? tracks
-        .map(normalizeQueueTrack)
+        .map(track => normalizeQueueTrack(track?.provider === 'netease' && /^\d+$/.test(track.id) ? {...track,url:`/api/music/stream?id=${track.id}&full=1`,playable:true} : track))
         .filter((track) => track && track.playable && track.url)
         .slice(0, PLAYLIST_RECOMMENDATION_LIMIT)
     : [];
@@ -2017,6 +2057,7 @@ function normalizeLikedLibrary(tracks) {
 
 function recommendationMetadata(track = {}) {
   return {
+    radioId: /^[\w.-]{1,160}$/.test(track.radioId || '') ? track.radioId : null,
     externalPlanId: /^ext-[\w-]{1,100}$/.test(track.externalPlanId || '') ? track.externalPlanId : null,
     origin: track.origin === 'external_agent' ? 'external_agent' : 'builtin',
     recommendationId: /^[\w-]{1,100}$/.test(track.recommendationId || '') ? track.recommendationId : null,
@@ -2076,6 +2117,8 @@ function normalizeQueueHostIntro(value) {
     enabled: value.enabled !== false,
     voiceCueId: String(value.voiceCueId || "").slice(0, 90),
     startAtMs: clampMs(value.startAtMs, 0, 0, HOST_INTRO_MAX_START_AT_MS),
+    windowEndMs:Number.isFinite(value.windowEndMs) ? clampMs(value.windowEndMs,0,0,MAX_RECOMMENDATION_DURATION_MS) : null,
+    timingSource:String(value.timingSource || 'legacy').slice(0,40),
     estimatedDurationMs: clampMs(
       value.estimatedDurationMs,
       estimateHostIntroDurationMs(displayText),
