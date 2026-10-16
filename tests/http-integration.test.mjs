@@ -107,7 +107,7 @@ test("HTTP contracts: sync, concurrent queue/feedback, zero-result safety and me
     assert.equal(rec.plan.queueAction, "cards");
     const track = rec.tracks[0];
     await Promise.all([
-      request("/api/queue", { queue: rec.tracks, currentIndex: 0 }),
+      request("/api/queue", { queue: rec.tracks, currentIndex: 0, expectedRevision: 0 }),
       request("/api/taste/library", { tracks: [track] }),
       request("/api/taste", { action: "like", track }),
     ]);

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
+    "mcp": "node scripts/awudio-mcp.mjs",
     "profile:ncm": "node scripts/distill-ncm-profile.mjs",
     "ncm": "npx NeteaseCloudMusicApi@latest",
     "test": "node --test tests/*.test.mjs",
@@ -14,5 +15,9 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
   }
 }

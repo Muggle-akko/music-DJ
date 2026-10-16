@@ -1,0 +1,7 @@
+# 复制此表到客户端实际使用的配置中；不要在此填写网易云 Cookie 或 AI Key。
+# command 需要 Node 22+。下面为当前电脑已安装的 Node 24 路径。
+[mcp_servers.awudio]
+command = "/Users/awu/.local/share/fnm/node-versions/v24.15.0/installation/bin/node"
+args = ["/Users/awu/Documents/ChatGPT/musicdj/scripts/awudio-mcp.mjs"]
+startup_timeout_sec = 20
+tool_timeout_sec = 20

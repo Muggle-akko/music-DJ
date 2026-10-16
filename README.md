@@ -93,7 +93,6 @@ POST /api/chat - 自然语言 DJ 请求。
 GET /api/music/search?q=关键词 - 搜索音乐。
 POST /api/taste - 记录喜欢、不喜欢和播放历史。
 GET /api/now - 当前播放状态。
-GET /api/plan/today - 占位用的每日电台计划。
 
 声音管线 / Fish Audio
 如果歌曲对象带有 hostIntro，前端会在对应时间点以 1.2 倍速读出讲解词，并把音乐音量渐低到约 16%，讲完后渐回。没有配置 Fish Audio 时，会使用浏览器内置 SpeechSynthesis 兜底。
@@ -119,6 +118,10 @@ GET /api/tts/audio/:file - 读取缓存的讲解音频。
 
 推荐系统 V2（本地试用）
 
-在 AI 电台勾选“试用新版推荐”，点击“同步偏好”取得收藏元数据。新版使用真实网易云候选 + 有限工具调用的 AI 选曲；实际播放和明确反馈分别记录。当前保留 V1 默认值，连续收听和个人对照验收后再推广。
+内置推荐统一使用 V2，V1 已移除。点击“同步偏好”取得收藏元数据。V2 使用真实网易云候选与有限工具调用选曲；实际播放和明确反馈分别记录。
 
 实施说明与测试命令见 [推荐 V2 实施记录](md/recommendation-v2-implementation.md)，规格见 [Agent PRD](md/recommendation-agent-prd.md)。
+
+外部 Agent 模式（已实现首版，尚未验收）
+
+在网页选择“外部 Agent”，通过本地 STDIO MCP 让 Codex 查询真实曲库、自行选歌、提交计划并控制网页播放。聊天在 Agent 中进行，外部工具路径不调用内置模型。见 [接入说明](md/external-agent-setup.md)、[外部 Agent 模式 PRD](md/external-agent-mode-prd.md)及 [音乐 Skill](skills/awudio/SKILL.md)。按用户要求，本轮暂未进行验收测试。

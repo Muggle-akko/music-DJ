@@ -1,4 +1,5 @@
 import { createListeningController } from "/listening.mjs";
+import { createAgentController } from "/agent.mjs";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
@@ -144,7 +145,12 @@ let audioRetryCount = 0;
 let listeningController = null;
 let queueMutationVersion = 0;
 let serverQueueRevision = 0;
-let algorithmVersion = localStorage.getItem('awudio.recommenderVersion') || 'v1';
+const algorithmVersion = 'v2';
+let externalAgentController = null;
+let playerPlaybackSessionId = null;
+let queueDirty = false;
+let queueConflict = false;
+let queueSavePromise = null;
 const eventClientId = sessionStorage.getItem('awudio.clientId') || crypto.randomUUID();
 sessionStorage.setItem('awudio.clientId', eventClientId);
 let latestRecommendationRequest = '';
@@ -221,7 +227,15 @@ async function init() {
   await restoreLikedTracks();
   await loadRadioHistory({ silent: true });
   if (accountUserId) listeningController = createListeningController({ audio, getTrack: () => currentTrack, post: postJson, accountId: accountUserId, clientId: eventClientId });
-  document.querySelector('#v2Toggle').checked = algorithmVersion === 'v2';
+  localStorage.removeItem('awudio.recommenderVersion');
+  externalAgentController = createAgentController({ getPlayback: externalPlaybackState, flushQueue: flushQueueWrites,
+    syncQueue: syncExternalQueue, syncFeedback: syncExternalFeedback, execute: executeExternalCommand, renderPlans: renderExternalPlans,
+    pause: () => audio.pause(), resume: () => togglePlay(), notice: showNotice,
+    onMode: mode => {
+      if (mode === 'external') latestRecommendationRequest = '';
+      brainStatus.textContent = mode === 'external' ? '[选歌: 外部 Agent]' : builtinBrainLabel;
+    },
+  });
   void loadProfileStatus();
   loadWeatherInfo();
 
@@ -235,11 +249,17 @@ async function init() {
 }
 
 function bindEvents() {
-  document.querySelector('#v2Toggle').addEventListener('change', event => {
-    algorithmVersion = event.target.checked ? 'v2' : 'v1';
-    localStorage.setItem('awudio.recommenderVersion', algorithmVersion);
-    showNotice(algorithmVersion === 'v2' ? '已切换到 V2 试用：真实候选选曲与独立反馈' : '已切回 V1 推荐');
+  const settings = document.querySelector('#radioSettings');
+  settings.addEventListener('beforetoggle', event => {
+    if (event.newState !== 'open') return;
+    const anchor = document.querySelector('#radioSettingsButton').getBoundingClientRect();
+    const width = Math.min(300, innerWidth - 32), below = innerHeight - anchor.bottom - 16;
+    settings.style.left = `${Math.max(16, Math.min(anchor.right - width, innerWidth - width - 16))}px`;
+    settings.style.top = `${below >= 220 ? anchor.bottom + 8 : Math.max(16, anchor.top - 220)}px`;
+    settings.style.maxHeight = `${Math.max(100, below >= 220 ? below : anchor.top - 24)}px`;
   });
+  document.querySelector('#useServerQueueButton').addEventListener('click', () => resolveQueueConflict(false));
+  document.querySelector('#keepLocalQueueButton').addEventListener('click', () => resolveQueueConflict(true));
   document.querySelector('#syncProfileButton').addEventListener('click', syncProfile);
   document.querySelector('#undoFeedbackButton').addEventListener('click', () => {
     if (!lastFeedbackUndo) return;
@@ -391,11 +411,12 @@ function bindEvents() {
   voiceAudio.addEventListener("ended", handleVoiceAudioEnded);
 }
 
+let builtinBrainLabel = '[大脑: 本地规则]';
 async function loadConfig() {
   const data = await getJson("/api/config");
-  if (!localStorage.getItem('awudio.recommenderVersion')) algorithmVersion = data.recommenderVersion || 'v1';
   brainStatus.textContent =
     data.aiProvider === "local" ? "[大脑: 本地规则]" : `[大脑: ${data.aiModel}]`;
+  builtinBrainLabel = brainStatus.textContent;
   sourceValue.textContent = data.ncm ? "[来源: 网易云]" : "[来源: 演示]";
 }
 
@@ -663,13 +684,13 @@ function getClientContext() {
 }
 
 function applyDjResponse(data, assistantMessageId, options = {}) {
+  if (externalAgentController?.mode === 'external') return;
   if (options.requestId && options.requestId !== latestRecommendationRequest) return;
-  const isV2 = data.algorithmVersion === 'v2';
   const staleQueue = options.queueMutationVersion !== undefined && options.queueMutationVersion !== queueMutationVersion;
   aiResults = data.tracks || [];
   const text = data.assistantText || buildClientDjReply(data.plan, aiResults);
   const mode = options.mode || data.mode || "chat";
-  const chatTracks = mode === "chat" || staleQueue || isV2 ? summarizeChatTracks(aiResults, isV2 ? 30 : CHAT_RECOMMENDATION_LIMIT) : [];
+  const chatTracks = summarizeChatTracks(aiResults, 30);
 
 
   updateAiChatMessage(assistantMessageId, text, {
@@ -682,7 +703,6 @@ function applyDjResponse(data, assistantMessageId, options = {}) {
   if (data.radioHistoryItem) {
     upsertRadioHistoryItem(data.radioHistoryItem);
   }
-  if (isV2) {
     if (data.control === 'next') playNext();
     else if (data.control === 'previous') playPrevious();
     else if (data.control === 'pause') audio.pause();
@@ -692,7 +712,6 @@ function applyDjResponse(data, assistantMessageId, options = {}) {
     if (staleQueue && ['replace','append'].includes(data.plan?.queueAction)) showNotice('生成期间队列有变化，结果已保留在对话中，未覆盖队列');
     else if (data.plan?.queueAction === 'replace' && aiResults.length) replaceQueueWithTracks(aiResults);
     else if (data.plan?.queueAction === 'append') addPlayableTracks(aiResults);
-  } else if ((options.replaceQueue || mode === "playlist") && !staleQueue) replaceQueueWithTracks(aiResults);
 }
 
 function buildClientDjReply(plan, tracks) {
@@ -906,13 +925,17 @@ async function togglePlay() {
   }
 }
 
-async function playTrack(index) {
+async function playTrack(index, { throwPlaybackErrors = false } = {}) {
   audioRetryCount = 0;
-  if (index < 0 || !queue[index] || !isPlayable(queue[index])) return;
+  if (index < 0 || !queue[index] || !isPlayable(queue[index])) {
+    if (throwPlaybackErrors) throw new Error('没有可播放的歌曲');
+    return;
+  }
 
   cancelVoicePipeline({ immediateRestore: true });
   spokenVoiceCueKeys = new Set();
   listeningController?.load(queue[index]);
+  playerPlaybackSessionId = crypto.randomUUID();
   currentIndex = index;
   currentTrack = queue[index];
   syncQueuePageToCurrent();
@@ -929,8 +952,9 @@ async function playTrack(index) {
     await audio.play();
     maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
-  } catch {
+  } catch (error) {
     setPlayState("[点击播放]", false);
+    if (throwPlaybackErrors) throw error;
   }
 }
 
@@ -1057,7 +1081,7 @@ function removeLikedTrack(track, options = {}) {
 function loadLikedTracks() {
   try {
     const tracks = JSON.parse(localStorage.getItem(LIKED_TRACKS_STORAGE_KEY) || "[]");
-    return Array.isArray(tracks) ? tracks.filter(isPlayable).map(normalizeClientTrack).slice(0, MAX_LIKED_TRACKS) : [];
+    return Array.isArray(tracks) ? tracks.filter(t => t?.id && t?.title).map(normalizeClientTrack).slice(0, MAX_LIKED_TRACKS) : [];
   } catch {
     return [];
   }
@@ -1071,7 +1095,7 @@ async function restoreLikedTracks() {
   try {
     const data = await getJson("/api/taste/library");
     const serverTracks = Array.isArray(data.tracks)
-      ? data.tracks.filter(isPlayable).map(normalizeClientTrack).slice(0, MAX_LIKED_TRACKS)
+      ? data.tracks.filter(t => t?.id && t?.title).map(normalizeClientTrack).slice(0, MAX_LIKED_TRACKS)
       : [];
     const localTracks = loadLikedTracks();
     likedTracks = mergeLikedTracks(serverTracks, localTracks);
@@ -1343,7 +1367,7 @@ function toggleQueueMenu(item) {
   if (!menu || !button || !shouldOpen) return;
   menu.hidden = false;
   menu.setAttribute("popover", "manual");
-  menu.setAttribute("aria-label", "歌曲操作");
+  menu.setAttribute("aria-label", menu.dataset.label || "歌曲操作");
   // The browser top layer escapes both scroll clipping and panel stacking contexts.
   menu.showPopover();
   const anchor = button.getBoundingClientRect();
@@ -1945,7 +1969,7 @@ async function startHostIntroVoice(track, intro, cueKey, token) {
       };
       updateHostIntroDisplay();
       scheduleHostCaptionIdleReset(token);
-      await delay(HOST_CAPTION_DISPERSE_MS);
+      await new Promise(resolve => setTimeout(resolve, HOST_CAPTION_DISPERSE_MS));
       if (isCurrentVoiceToken(token)) {
         activeVoiceTask = null;
         stopHostCaptionAnimation();
@@ -2876,6 +2900,8 @@ function dedupeTracks(tracks) {
 
 function normalizeClientTrack(track) {
   return {
+    externalPlanId: track.externalPlanId || null,
+    origin: track.origin === 'external_agent' ? 'external_agent' : 'builtin',
     recommendationId: track.recommendationId || null,
     stageId: String(track.stageId || ''),
     recommendationScene: String(track.recommendationScene || ''),
@@ -2970,6 +2996,7 @@ function trackKey(track) {
 
 function persistQueue() {
   queueMutationVersion++;
+  queueDirty = true;
   clearTimeout(saveQueueTimer);
   saveQueueTimer = window.setTimeout(() => {
     void saveQueue();
@@ -2977,13 +3004,24 @@ function persistQueue() {
 }
 
 async function saveQueue() {
-  try {
-    const saved = await postJson("/api/queue", { queue, currentIndex });
-    serverQueueRevision = saved.revision || serverQueueRevision;
-    saveQueueFallback();
-  } catch {
-    saveQueueFallback();
-  }
+  if (queueSavePromise) return queueSavePromise;
+  queueSavePromise = (async () => {
+    while (queueDirty && !queueConflict) {
+      const version = queueMutationVersion;
+      const response = await fetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queue, currentIndex, expectedRevision: serverQueueRevision }) });
+      const saved = await response.json();
+      if (response.status === 409) {
+        queueConflict = true; document.querySelector('#queueConflictPanel').hidden = false;
+        showNotice('队列有冲突，本页编辑已保留，请选择如何同步'); break;
+      }
+      if (!response.ok || !saved.ok) throw new Error(saved.error || '队列保存失败');
+      serverQueueRevision = saved.revision;
+      if (version === queueMutationVersion) queueDirty = false;
+      saveQueueFallback();
+    }
+  })().catch(() => { saveQueueFallback(); }).finally(() => { queueSavePromise = null; });
+  return queueSavePromise;
 }
 
 async function restoreQueue() {
@@ -3008,6 +3046,163 @@ async function restoreQueue() {
 
 function saveQueueFallback() {
   localStorage.setItem(QUEUE_FALLBACK_STORAGE_KEY, JSON.stringify({ queue, currentIndex }));
+}
+
+async function flushQueueWrites() {
+  clearTimeout(saveQueueTimer);
+  if (queueDirty) await saveQueue();
+  return !queueDirty && !queueConflict;
+}
+
+const appliedExternalFeedback = new Map();
+function syncExternalFeedback(feedback) {
+  let changed = false;
+  for (const entry of feedback) {
+    if (appliedExternalFeedback.get(entry.trackId) === entry.eventId || listeningController?.hasPendingLike(entry.trackId)) continue;
+    appliedExternalFeedback.set(entry.trackId, entry.eventId);
+    const track = likedTracks.find(t => t.id === entry.trackId) || queue.find(t => t.id === entry.trackId) || normalizeClientTrack({ ...entry.metadata, id: entry.trackId, provider: 'netease' });
+    const key = trackKey(track);
+    if (entry.liked) { likedTrackKeys.add(key); upsertLikedTrack(track); }
+    else { likedTrackKeys.delete(key); likedTracks = likedTracks.filter(t => trackKey(t) !== key); }
+    changed = true;
+  }
+  if (changed) { saveLikedTrackKeys(); saveLikedTracks(); renderQueue(); updateLikeButton(); }
+}
+
+function externalPlaybackState() {
+  return { trackId: currentTrack?.id || null,
+    playbackSessionId: audio.currentSrc ? listeningController?.playbackSessionId || playerPlaybackSessionId : null,
+    paused: audio.paused, loaded: Boolean(audio.currentSrc), positionMs: Math.round((audio.currentTime || 0) * 1000),
+    durationMs: Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : 0,
+    queueRevision: serverQueueRevision, queueMutationVersion };
+}
+
+async function syncExternalQueue(snapshot) {
+  if (queueDirty || queueConflict || snapshot.revision === serverQueueRevision) return;
+  const oldKey = currentTrack ? trackKey(currentTrack) : null;
+  const loaded = Boolean(audio.currentSrc);
+  const nextQueue = (snapshot.queue || []).map(normalizeClientTrack).filter(isPlayable);
+  const same = oldKey ? nextQueue.findIndex(t => trackKey(t) === oldKey) : -1;
+  queue = nextQueue;
+  currentIndex = loaded && same >= 0 ? same : snapshot.currentIndex;
+  if (currentIndex < 0 || currentIndex >= queue.length) currentIndex = -1;
+  if (loaded && same < 0) {
+    audio.pause(); audio.removeAttribute('src'); audio.load();
+    listeningController?.load(null); playerPlaybackSessionId = null;
+  }
+  currentTrack = currentIndex >= 0 ? queue[currentIndex] : null;
+  serverQueueRevision = snapshot.revision;
+  saveQueueFallback(); syncQueuePageToCurrent(); renderQueue();
+  if (!loaded || same < 0) renderCurrentTrack();
+  refreshResultActions();
+}
+
+async function resolveQueueConflict(keepLocal) {
+  try {
+    if (queueSavePromise) await queueSavePromise;
+    const latest = await getJson('/api/queue');
+    queueConflict = false;
+    document.querySelector('#queueConflictPanel').hidden = true;
+    if (keepLocal) {
+      serverQueueRevision = latest.revision; queueDirty = true;
+      await saveQueue();
+    } else {
+      queueDirty = false;
+      serverQueueRevision = -1; // Force an explicit user-authorized reconciliation.
+      await syncExternalQueue(latest);
+    }
+    void externalAgentController?.refresh();
+  } catch (error) { showNotice(error.message); }
+}
+
+function waitForAudioPlaying() {
+  if (!audio.paused && audio.readyState >= 3) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = error => {
+      clearTimeout(timer); audio.removeEventListener('playing', playing); audio.removeEventListener('error', failed);
+      error ? reject(error) : resolve();
+    };
+    const playing = () => finish();
+    const failed = () => finish(new Error('音源播放失败'));
+    const timer = setTimeout(() => finish(new Error('等待实际播放超时')), 10000);
+    audio.addEventListener('playing', playing, { once: true }); audio.addEventListener('error', failed, { once: true });
+  });
+}
+
+async function executeExternalCommand(command) {
+  if (command.action === 'pause') { audio.pause(); return 'paused'; }
+  if (command.playMode === 'list') setPlayMode('list');
+  let index = currentIndex;
+  if (command.action === 'play_first') index = queue.findIndex(t => t.id === command.trackId);
+  else if (command.action === 'next') { listeningController?.skip(); index = playMode === 'shuffle' ? findRandomPlayableIndex(currentIndex) : findNextPlayableIndex(currentIndex); }
+  else if (command.action === 'previous') index = playMode === 'shuffle' ? findRandomPlayableIndex(currentIndex) : findPreviousPlayableIndex(currentIndex);
+  else if (command.action === 'play' && index < 0) index = resolvePlayableIndex(queue);
+  if (index < 0 || !queue[index]) throw new Error('队列没有可播放歌曲');
+  const targetId = queue[index].id;
+  // Pause first for a new track, so a previously playing audio element cannot satisfy this receipt.
+  if (command.action !== 'play' || !audio.currentSrc) {
+    audio.pause();
+    const started = waitForAudioPlaying();
+    await Promise.all([playTrack(index, { throwPlaybackErrors: true }), started]);
+  } else {
+    const started = waitForAudioPlaying();
+    await Promise.all([audio.play(), started]);
+  }
+  if (currentTrack?.id !== targetId || audio.paused || audio.readyState < 3) throw new Error('实际播放与命令目标不一致');
+  return 'playing';
+}
+
+function renderExternalPlans(plans, apply) {
+  const target = document.querySelector('#agentPlans'); target.replaceChildren();
+  for (const plan of plans) {
+    const article = document.createElement('article'); article.className = 'agent-plan';
+    const title = document.createElement('h3'); title.textContent = plan.requestSummary;
+    const meta = document.createElement('p'); meta.className = 'agent-plan-meta';
+    const expired = Date.parse(plan.expiresAt) < Date.now();
+    meta.textContent = `${plan.tracks.length} 首 · ${Math.round(plan.tracks.reduce((n, t) => n + t.duration, 0) / 60000)} 分钟${expired ? ' · 已过期' : ''}`;
+    const list = document.createElement('ol'); list.className = 'agent-track-list';
+    const reasons = document.createElement('details'); reasons.className = 'agent-plan-reasons';
+    const reasonsTitle = document.createElement('summary'); reasonsTitle.textContent = '选曲说明'; reasons.append(reasonsTitle);
+    for (const track of plan.tracks) {
+      const li = document.createElement('li');
+      const cover = document.createElement(track.cover ? 'img' : 'span'); cover.className = 'agent-track-cover';
+      if (track.cover) { cover.src = track.cover; cover.alt = ''; cover.loading = 'lazy'; }
+      const info = document.createElement('div'); info.className = 'agent-track-info';
+      const name = document.createElement('strong'); name.textContent = track.title; name.title = track.title;
+      const artist = document.createElement('span'); artist.textContent = track.artist; artist.title = track.artist;
+      const duration = document.createElement('span'); duration.className = 'agent-track-duration'; duration.textContent = formatTrackDuration(track.duration);
+      info.append(name, artist); li.append(cover, info, duration); list.append(li); observeRecommendationCard(li, track);
+      if (track.reasonSummary) { const reason = document.createElement('p'); reason.textContent = `${track.title}：${track.reasonSummary}`; reasons.append(reason); }
+    }
+    const actions = document.createElement('div'); actions.className = 'agent-plan-actions';
+    const actionButtons = [];
+    async function run(queueMode, playback) {
+      closeQueueMenus(); article.setAttribute('aria-busy', 'true');
+      actionButtons.forEach(button => { button.disabled = true; });
+      try { await apply(plan.id, queueMode, playback); }
+      finally { article.removeAttribute('aria-busy'); actionButtons.forEach(button => { button.disabled = Date.parse(plan.expiresAt) < Date.now(); }); }
+    }
+    for (const [label, symbol, css, queueMode, playback] of [
+      ['播放', 'play-fill', '', 'replace_all', 'play_first'],
+      ['加入队列', 'plus', 'secondary', 'append', 'keep'],
+    ]) {
+      const button = document.createElement('button'); button.className = `workspace-action ${css}`; button.type = 'button';
+      button.innerHTML = icon(symbol); const labelNode = document.createElement('span'); labelNode.textContent = label; button.append(labelNode);
+      button.title = playback === 'play_first' ? '播放这份推荐并替换队列' : '加入队尾，保持当前播放';
+      button.disabled = expired; button.addEventListener('click', () => run(queueMode, playback));
+      actionButtons.push(button); actions.append(button);
+    }
+    const more = document.createElement('button'); more.className = 'menu-button'; more.type = 'button';
+    more.innerHTML = icon('dots-three'); more.setAttribute('aria-label', '更多歌单操作'); more.setAttribute('aria-expanded', 'false');
+    more.disabled = expired; more.addEventListener('click', () => toggleQueueMenu(article));
+    const menu = document.createElement('div'); menu.className = 'queue-menu'; menu.hidden = true; menu.dataset.label = '歌单操作';
+    const replaceUpcoming = document.createElement('button'); replaceUpcoming.type = 'button'; replaceUpcoming.textContent = '替换待播，保留当前歌曲';
+    replaceUpcoming.disabled = expired; replaceUpcoming.addEventListener('click', () => run('replace_upcoming', 'keep'));
+    menu.append(replaceUpcoming); actions.append(more); actionButtons.push(more, replaceUpcoming);
+    article.append(title, meta, list);
+    if (reasons.children.length > 1) article.append(reasons);
+    article.append(actions, menu); target.append(article);
+  }
 }
 
 function loadQueueFallback() {
@@ -3184,7 +3379,11 @@ async function loadProfileStatus() {
     const data = await getJson('/api/profile/status');
     const node = document.querySelector('#profileStatus');
     node.textContent = data.state === 'running' ? `正在同步偏好，已取得 ${data.fetched || 0} 首…` : data.state === 'error' ? `同步失败：${data.error}` : data.coverage ? `偏好库 ${data.coverage.fetchedLikedTrackCount}/${data.coverage.likedPlaylistDeclaredTrackCount} 首${data.complete ? '' : '（部分）'} · 播放榜为部分样本${data.stale ? ' · 可更新' : ''}` : '偏好库尚未同步，可先同步收藏。';
-    document.querySelector('#syncProfileButton').disabled = data.state === 'running';
+    const syncButton = document.querySelector('#syncProfileButton');
+    syncButton.disabled = data.state === 'running';
+    syncButton.setAttribute('aria-busy', String(data.state === 'running'));
+    syncButton.innerHTML = icon('arrow-clockwise') + (data.state === 'running' ? '正在同步' : '同步收藏');
+    document.querySelector('#radioSettingsButton').title = data.coverage ? `音乐偏好 · 已同步 ${Number(data.coverage.fetchedLikedTrackCount).toLocaleString()} 首收藏` : '音乐偏好';
     clearTimeout(profilePollTimer);
     if (data.state === 'running') profilePollTimer = setTimeout(loadProfileStatus, 2000);
   } catch { document.querySelector('#profileStatus').textContent = '暂时无法读取偏好库状态'; }

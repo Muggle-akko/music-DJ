@@ -1,5 +1,7 @@
 # Awudio 推荐系统 V2：供开发 Agent 执行的 PRD
 
+> 后续决定：内置 V1 已移除，内置推荐统一 V2；外部 Agent 模式以 [外部 Agent PRD](external-agent-mode-prd.md) 为准。本文件保留 V2 初次设计背景。
+
 状态：工程实现已接入、本地试用中；连续收听与个人体验验收尚未完成。详见 [实施与验收记录](./recommendation-v2-implementation.md)。
 日期：2026-10-16。代码基线：`3e8f56c`。
 适用范围：当前本地、单用户 Awudio，继续使用 Node 服务、网易云适配服务、现有 DeepSeek/OpenAI 配置。

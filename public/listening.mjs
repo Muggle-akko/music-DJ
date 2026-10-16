@@ -145,7 +145,7 @@ export function createListeningController({
     stageId: track?.stageId || "",
     scene:
       track?.playlistStage?.mood || track?.recommendationScene || "unknown",
-    source: track?.recommendationId ? "radio" : "manual",
+    source: track?.origin === 'external_agent' ? 'external_agent' : track?.recommendationId ? "radio" : "manual",
   });
   async function flush() {
     if (flushing || !pending.length) return;
@@ -252,6 +252,8 @@ export function createListeningController({
     void flush();
   });
   return {
+    get playbackSessionId() { return tracker.session?.id || null; },
+    hasPendingLike(trackId) { return pending.some(e => e.trackId === trackId && ['like', 'unlike'].includes(e.type)); },
     action,
     flush,
     load(track) {

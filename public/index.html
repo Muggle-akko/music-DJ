@@ -107,19 +107,54 @@
             <button class="tab-button" id="playlistTab" type="button" role="tab" aria-selected="false" aria-controls="playlistPane" tabindex="-1">我的歌单</button>
           </div>
           <div class="tab-pane is-active" id="aiPane" role="tabpanel" aria-labelledby="aiTab">
-            <div class="chat-toolbar">
-              <button class="round-icon-button" id="clearAiChatButton" type="button" aria-label="新对话" title="新对话"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#chat-circle"></use></svg></button>
-              <button class="workspace-action" id="generatePlaylistButton" type="button" title="生成歌单并替换播放队列"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#sparkle"></use></svg><span>生成歌单</span></button>
+            <div class="radio-modebar">
+              <div class="radio-mode-switch" role="group" aria-label="选歌方式">
+                <button id="builtinModeButton" type="button" data-radio-mode="builtin" aria-pressed="true">内置推荐</button>
+                <button id="externalModeButton" type="button" data-radio-mode="external" aria-pressed="false">外部 Agent</button>
+              </div>
+              <button class="round-icon-button" id="radioSettingsButton" type="button" popovertarget="radioSettings" aria-label="电台设置" title="电台设置"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#dots-three"></use></svg></button>
+              <div id="radioSettings" class="workspace-popover" popover>
+                <h3>音乐偏好</h3>
+                <p class="view-status" id="profileStatus" role="status">正在读取偏好库…</p>
+                <button class="workspace-action secondary" id="syncProfileButton" type="button"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg>同步收藏</button>
+              </div>
             </div>
-            <div class="recommendation-settings"><label class="algorithm-toggle"><input id="v2Toggle" type="checkbox">试用新版推荐</label><button class="workspace-action secondary" id="syncProfileButton" type="button">同步偏好</button><button class="workspace-action secondary" id="undoFeedbackButton" type="button" hidden>撤销反馈</button></div>
-            <p class="view-status" id="profileStatus" role="status">正在读取偏好库…</p>
-            <p class="view-hint">生成歌单会替换队列，普通推荐先展示歌曲。新版推荐目前处于试用验收阶段。</p>
+            <button class="text-action feedback-undo" id="undoFeedbackButton" type="button" hidden>撤销刚才的反馈</button>
+            <div id="queueConflictPanel" class="queue-conflict" hidden><p>队列已在其他页面更新。本页编辑已保留。</p><div class="conflict-actions"><button class="workspace-action" id="useServerQueueButton" type="button">使用最新队列</button><button class="workspace-action secondary" id="keepLocalQueueButton" type="button">保留本页编辑</button></div></div>
+            <section id="externalAgentPanel" class="external-agent-panel" aria-label="外部 Agent" hidden>
+              <div class="agent-connection-row">
+                <span class="connection-status" id="agentConnectionState" data-state="waiting"><span class="connection-dot" aria-hidden="true"></span><span id="agentStatus" role="status">正在连接播放器…</span></span>
+                <button class="text-action" id="agentConnectionSettingsButton" type="button" aria-expanded="false" aria-controls="agentConnectionSettings">连接设置<svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#caret-right"></use></svg></button>
+              </div>
+              <div class="agent-connection-settings" id="agentConnectionSettings" hidden>
+                <div class="agent-settings-heading"><span>播放设备</span><button class="round-icon-button" id="agentRefreshButton" type="button" aria-label="刷新连接" title="刷新连接"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button></div>
+                <p class="view-status" id="agentDeviceSummary">正在查找播放页面…</p>
+                <div class="agent-device-row" id="agentDeviceControls"><select id="agentPlayerSelect" aria-label="选择播放页面"></select><button class="workspace-action secondary" id="agentSelectPlayerButton" type="button">设为播放页面</button></div>
+              </div>
+              <div class="agent-operation" id="agentOperationPanel" hidden><p id="agentOperationStatus" role="status"></p><button class="workspace-action" id="agentResumeButton" type="button" hidden>点击开始播放</button></div>
+              <div class="agent-empty" id="agentEmptyState">
+                <svg class="ph-icon agent-empty-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#chat-circle"></use></svg>
+                <h2 id="agentEmptyTitle">连接你的音乐助手</h2>
+                <p id="agentEmptyDescription">在 Codex 里聊想听的音乐，选好的歌会同步到这里。</p>
+                <button class="agent-example" id="agentExampleButton" type="button" title="复制示例，粘贴到你的 Agent 中"><span>推荐几首英国乐队 Bôa 的歌</span><span class="example-action">复制示例</span></button>
+                <details class="agent-setup-guide" id="agentSetupGuide"><summary>如何连接</summary><ol><li>在 Codex 的 MCP 设置中添加 Awudio。项目已提供配置：<code>config/awudio-mcp.example.toml</code></li><li>使用项目中的 Awudio 音乐 Skill，在 Agent 对话里说出需求。</li><li>推荐会先展示；告诉 Agent 播放后，这里开始放歌。</li></ol></details>
+              </div>
+              <div id="agentPlans" class="agent-plans" aria-live="polite" hidden></div>
+              <p class="agent-footer">对话留在 Agent，音乐在这里继续。</p>
+            </section>
+            <div id="builtinRecommendation">
+            <div class="chat-toolbar">
+              <button class="workspace-action ghost" id="clearAiChatButton" type="button" title="新对话"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#chat-circle"></use></svg><span>新对话</span></button>
+              <button class="workspace-action secondary" id="generatePlaylistButton" type="button" title="生成歌单并替换播放队列"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#sparkle"></use></svg><span>生成歌单</span></button>
+            </div>
+            <p class="view-hint">生成歌单会替换队列，普通推荐先展示歌曲。</p>
             <div class="chat-history" id="aiChatHistory" aria-live="polite" aria-label="AI 对话记录"></div>
             <p class="view-status" id="aiStatus" role="status"></p>
             <form class="chat-composer" id="aiComposer">
               <div class="chat-input-shell"><textarea id="aiInput" rows="1" spellcheck="false" placeholder="告诉我你现在想听什么" aria-label="点歌需求"></textarea></div>
               <button class="round-icon-button" id="sendAiButton" type="submit" aria-label="发送" title="发送"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#paper-plane-tilt"></use></svg></button>
             </form>
+            </div>
           </div>
           <div class="tab-pane" id="searchPane" role="tabpanel" aria-labelledby="searchTab" hidden>
             <form class="search-row" id="searchForm">

@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import vm from "node:vm";
 import {
   cases,
   fixtureProfile,
@@ -8,72 +6,21 @@ import {
 import { recommend } from "../lib/recommendation/orchestrator.mjs";
 import { createPlayability } from "../lib/recommendation/playability.mjs";
 import { localIntent } from "../lib/recommendation/intent.mjs";
-import { candidate, rejectReason } from "../lib/recommendation/candidates.mjs";
+import { rejectReason } from "../lib/recommendation/candidates.mjs";
 import { atomicJson } from "../lib/storage.mjs";
 const fixed = Date.parse("2026-10-16T00:00:00Z");
-class FixedDate extends Date {
-  constructor(...args) {
-    super(...(args.length ? args : [fixed]));
-  }
-  static now() {
-    return fixed;
-  }
-}
-const context = vm.createContext({ Date: FixedDate });
-vm.runInContext(
-  await readFile(
-    new URL("../tests/fixtures/v1-ranking-source.txt", import.meta.url),
-    "utf8"
-  ),
-  context
-);
 const rows = [];
 for (const [message, options] of cases) {
   const plan = localIntent(message, options),
     state = { tasteProfile: {}, plays: [], queue: [] };
-  const scene = {
-    mood: plan.mood,
-    keywords: plan.softPreferences.map((p) => p.value),
-    styleHints: [],
-    isWeekend: false,
-    timeSlot: "afternoon",
-  };
-  const pool = fixtureProfile.allLikedSongs.map((t) => ({
-    ...t,
-    styleTags: t.features.genre.map((g) => g.value),
-  }));
-  context.fixtureSongs = pool;
-  context.fixtureContext = {
-    scene,
-    plan: { search: "" },
-    state,
-    recentIds: new Set(),
-    currentQueueIds: new Set(),
-    recentRadioIds: new Set(),
-    requestedCount: plan.requestedCount,
-  };
-  const v1 =
-    plan.queueAction === "none"
-      ? []
-      : vm.runInContext(
-          "fixtureSongs.map(song=>({song,score:scoreProfileSong(song,fixtureContext)})).sort((a,b)=>b.score-a.score).slice(0,Math.min(30,fixtureContext.requestedCount||5)).map(item=>item.song)",
-          context
-        );
   const checkContext = {
     now: fixed,
-    likedIds: new Set(pool.map((t) => t.id)),
+    likedIds: new Set(fixtureProfile.allLikedSongs.map((t) => t.id)),
     profileComplete: true,
     learning: { tracks: {} },
     currentIds: new Set(),
     sessionIds: new Set(),
   };
-  const v1Violations = v1.filter((t) =>
-    rejectReason(
-      candidate(t, { source: "liked_library" }, checkContext),
-      plan,
-      checkContext
-    )
-  ).length;
   const common = {
     message,
     options,
@@ -112,7 +59,6 @@ for (const [message, options] of cases) {
     ).length;
   rows.push({
     message,
-    v1RankingOnly: { ids: v1.map((t) => t.id), hardViolations: v1Violations },
     v2: {
       ids: deterministic.tracks.map((t) => t.id),
       hardViolations: violations(deterministic),
@@ -127,13 +73,8 @@ for (const [message, options] of cases) {
 }
 const summary = {
   fixtureCount: rows.length,
-  v1Scope: "Frozen V1 profile score only, not its full multi-source pipeline",
   agentScope:
     "Deterministic stub tests the agent protocol; not a quality evaluation of DeepSeek",
-  v1RankingHardViolations: rows.reduce(
-    (n, r) => n + r.v1RankingOnly.hardViolations,
-    0
-  ),
   v2HardViolations: rows.reduce((n, r) => n + r.v2.hardViolations, 0),
   v2StubHardViolations: rows.reduce(
     (n, r) => n + r.v2StubAgent.hardViolations,

@@ -1,10 +1,11 @@
-const CACHE_NAME = "awudio-workspace-v22";
+const CACHE_NAME = "awudio-workspace-v24";
 const STATIC_ASSETS = [
   "/",
   "/index.html",
   "/styles.css",
   "/app.js",
   "/listening.mjs",
+  "/agent.mjs",
   "/assets/phosphor.svg",
   "/manifest.webmanifest",
   "/fonts/google-fonts.css",
