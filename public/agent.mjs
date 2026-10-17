@@ -2,8 +2,9 @@ import { syncDelay } from '/sync-policy.mjs?v=36';
 import { browserDataCache } from '/network.mjs?v=46';
 import { mobileClient } from "/device-policy.mjs?v=36";
 import { apiFetch } from "/network.mjs?v=46";
+export { createRecommendationController as createAgentController } from '/recommendations.mjs?v=51';
 // External Agent integration. The browser owns audio; the server owns durable plans and commands.
-export function createAgentController(adapter) {
+export function createRealtimeAgentController(adapter) {
   let token, playerId, mode = 'builtin', lastSnapshot, initializing, refreshing, repeat = false;
   let streamAbort, stopped = false, lastLease = null;
   let heartbeatRunning = false, renderKey = '', manualVersion = 0;
@@ -186,16 +187,32 @@ export function createAgentController(adapter) {
     } catch { /* Heartbeat snapshots recover missing events. */ }
     if (!stopped && token && streamAbort === controller) setTimeout(() => { if (!stopped && token) void stream(); }, 3000);
   }
-  async function applyPlan(planId, queueMode, playback) {
+  const applyingPlans=new Map();
+  function applyPlan(planId, queueMode, playback, onProgress=()=>{}) {
+    if(applyingPlans.has(planId))return applyingPlans.get(planId);
+    const progress=(stage,text)=>onProgress({stage,text,queueMode,playback});
+    const job=(async()=>{
     try {
-      if (!await adapter.flushQueue()) throw new Error('请先处理队列冲突');
+      progress('applying','正在同步当前队列…');
+      await initialize();
+      if (!await adapter.flushQueue()) throw new Error('请先处理队列同步失败或冲突');
       await api('heartbeat', { playback: adapter.getPlayback() });
       const snapshot = await api('snapshot');
       const target = snapshot.lease?.playerId;
       if (!target) throw new Error('请先选择接收播放的页面');
-      await api('apply', { operationId: crypto.randomUUID(), planId, expectedRevision: snapshot.players.find(p=>p.playerId===target)?.playback?.queueRevision ?? snapshot.revision, queueMode, playback, targetPlayerId: target });
-      await refresh();
-    } catch (error) { adapter.notice(error.message); }
+      progress('saving','正在加入队列，不会逐首等待播放校验…');
+      const result=await api('apply', { operationId: crypto.randomUUID(), planId, expectedRevision: snapshot.players.find(p=>p.playerId===target)?.playback?.queueRevision ?? snapshot.revision, queueMode, playback, targetPlayerId: target });
+      if(!result.queueUpdated)throw new Error('云端尚未确认队列更新，请刷新队列后核对');
+      const refreshed=await refresh();
+      const text=refreshed?'队列已更新，云端已保存':'云端队列已保存，本页暂未刷新，请稍后刷新查看';
+      progress('complete',text);adapter.notice(text);
+      return {stage:'complete',text,queueMode,playback};
+    } catch (error) {
+      const text=`操作未完成：${error.message}`;progress('error',text);adapter.notice(text);
+      return {stage:'error',text,queueMode,playback};
+    }
+    })().finally(()=>applyingPlans.delete(planId));
+    applyingPlans.set(planId,job);return job;
   }
   for (const button of document.querySelectorAll('[data-radio-mode]')) button.addEventListener('click', async () => {
     if (modeChanging || button.dataset.radioMode === mode) return;

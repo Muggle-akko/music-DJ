@@ -1,4 +1,4 @@
-const CACHE_NAME = "awudio-workspace-v47";
+const CACHE_NAME = "awudio-workspace-v51";
 const COVER_CACHE_NAME = "awudio-covers-v1";
 const MAX_COVER_ENTRIES = 240;
 const STATIC_ASSETS = [
@@ -12,6 +12,9 @@ const STATIC_ASSETS = [
   "/settings.mjs",
   "/listening.mjs",
   "/agent.mjs",
+  "/recommendations.mjs",
+  "/plan-actions.mjs",
+  "/recommendation-feed.mjs",
   "/radio.mjs",
   "/network.mjs",
   "/data-cache.mjs",

@@ -1,5 +1,5 @@
 import { mobileClient } from '/device-policy.mjs?v=36';
-import { createPlayerMorph } from '/player-morph.mjs?v=47';
+import { createPlayerMorph } from '/player-morph.mjs?v=49';
 export function createMobileWorkspace({getTrack,onLocate}={}) {
   const el=id=>document.getElementById(id);
   const request=document.querySelector('.request-panel'), queue=document.querySelector('.queue-panel');
@@ -11,7 +11,7 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   topStop.className='mobile-top-stop';topStop.setAttribute('aria-hidden','true');topStop.hidden=true;
   document.body.prepend(topStop);
   const playerMorph=createPlayerMorph(document.querySelector('.player-panel'));
-  const settingNodes=['agentConnectionSettings','radioSettings'].map(id=>{
+  const settingNodes=['radioSettings'].map(id=>{
     const node=el(id),slot=document.createComment(id);node.before(slot);return {node,slot};
   });
   const tabNames=['aiTab','searchTab','playlistTab'].map(id=>({node:el(id),desktop:el(id).textContent}));
@@ -21,9 +21,6 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   function update() {
     const track=getTrack?.();
     el('locateCurrent').hidden=!track || face!=='queue';
-  }
-  function returnToPlayer() {
-    playerMorph.expand();
   }
 
   function renderFace(value) {
@@ -108,7 +105,6 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   handle.addEventListener('pointermove',event=>{if(drag?.id===event.pointerId)sheet.style.setProperty('--sheet-drag',`${Math.max(0,event.clientY-drag.y)}px`);});
   const endDrag=event=>{if(drag?.id!==event.pointerId)return;const close=event.type!=='pointercancel' && event.clientY-drag.y>80;drag=null;sheet.style.removeProperty('--sheet-drag');if(close)sheet.close();};
   handle.addEventListener('pointerup',endDrag);handle.addEventListener('pointercancel',endDrag);
-  el('returnToPlayer').addEventListener('click',returnToPlayer);
   el('locateCurrent').addEventListener('click',()=>onLocate?.());
   matchMedia('(max-width: 860px)').addEventListener('change',layout);layout();
   return { update,showQueue:()=>showFace('queue'), get compact(){return compact;} };

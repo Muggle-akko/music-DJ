@@ -1,11 +1,11 @@
 import { recentPlayback } from '/recent-playback.mjs?v=46';
 import { createTrackWaveform } from "/waveform.mjs?v=46";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=47";
+import { createMobileWorkspace } from "/mobile.mjs?v=49";
 import { createMediaSession } from "/media-session.mjs?v=36";
 import { browserDataCache, apiFetch } from "/network.mjs?v=46";
 import { createListeningController } from "/listening.mjs?v=36";
-import { createAgentController } from "/agent.mjs?v=46";
+import { createAgentController } from "/agent.mjs?v=51";
 import { createRadioStudio } from "/radio.mjs?v=46";
 
 const audio = document.querySelector("#audio");
@@ -217,6 +217,9 @@ let spectrumFallVelocity = Array.from({ length: SEGMENT_COUNT }, () => 0);
 
 let mediaControls, mobileWorkspace;
 let cloudQueueReady=false;
+const failedPlaybackTracks=new Set();
+let playbackAttempt=0,failedPlaybackAttempt=-1;
+let activeTrackLoad=null,trackSlowTimer=0,trackLoadTimer=0;
 let recentCacheTimer=0;
 let recentSaveAt=0;
 let recentAudioTrackKey='';
@@ -272,7 +275,7 @@ async function init() {
   radioStudio = createRadioStudio({flushQueue:flushQueueWrites,getRevision:()=>serverQueueRevision,notice:showNotice,
     onSaved:async radio=>{upsertRadioHistoryItem(radio);await loadRadioHistory({silent:true,force:true});}});
   externalAgentController = createAgentController({ events:playerEventsEnabled,getPlayback: externalPlaybackState, flushQueue: flushQueueWrites,
-    syncQueue: syncExternalQueue, syncFeedback: syncExternalFeedback, execute: executeExternalCommand, renderPlans: renderExternalPlans,
+    applyPlan: applyRecommendationPlan, syncQueue: syncExternalQueue, syncFeedback: syncExternalFeedback, execute: executeExternalCommand, renderPlans: renderExternalPlans,
     pause: () => audio.pause(), resume: () => togglePlay(), notice: showNotice,
     onRadioChange: () => { void loadRadioHistory({silent:true,force:true}); },
     onMode: mode => {
@@ -378,11 +381,11 @@ function bindEvents() {
   generatePlaylistButton.addEventListener("click", generateAiPlaylist);
   clearAiChatButton.addEventListener("click", clearAiChat);
   loadPlaylistsButton.addEventListener("click", () => loadUserPlaylists({force:true}));
-  queueTab.addEventListener("click", () => setQueueView("queue"));
-  likedTab.addEventListener("click", () => setQueueView("liked"));
+  queueTab.addEventListener("click", () => { setQueueView("queue"); void refreshSharedQueue(); });
+  likedTab.addEventListener("click", () => { setQueueView("liked"); void refreshSharedLikes(); });
   historyTab.addEventListener("click", () => {
     setQueueView("history");
-    if (!radioHistory.length) void loadRadioHistory();
+    void loadRadioHistory({silent:true,force:true});
   });
   queuePrevPage.addEventListener("click", () => setQueuePage(queuePage - 1));
   queueNextPage.addEventListener("click", () => setQueuePage(queuePage + 1));
@@ -439,6 +442,8 @@ function bindEvents() {
     scheduleHostIntroVoiceCheck();
   });
   audio.addEventListener("playing", () => {
+    clearTrackLoading();
+    if(currentTrack)failedPlaybackTracks.delete(trackKey(currentTrack));
     rememberRecentPlayback(true);
     clearTimeout(recentCacheTimer);
     if(!mobileClient){
@@ -454,7 +459,7 @@ function bindEvents() {
     scheduleHostIntroVoiceCheck();
   });
   for (const event of ["waiting", "stalled"]) audio.addEventListener(event, event => {
-    if (!audio.paused && !audio.ended && (event.type === "waiting" || audio.readyState < 3)) setPlayState("[缓冲中]", false);
+    if (!audio.paused && !audio.ended && (event.type === "waiting" || audio.readyState < 3)){startTrackLoading();setPlayState("[缓冲中]", false);}
   });
   audio.addEventListener("play", () => {
     rememberRecentPlayback(true);
@@ -463,11 +468,14 @@ function bindEvents() {
     playButton.setAttribute("aria-label", "暂停");
     playButton.title = "暂停";
     setPlayIcon(false);
+    if(audio.readyState<3)startTrackLoading();
     updateHostIntroDisplay();
     maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
   });
   audio.addEventListener("pause", () => {
+    if(!audio.paused)return;
+    clearTrackLoading();
     stopSpectrumMeter();
     cancelVoicePipeline({ immediateRestore: true });
     if (currentTrack) setPlayState("[已暂停]", false);
@@ -481,28 +489,7 @@ function bindEvents() {
     scheduleHostIntroVoiceCheck();
   });
   audio.addEventListener("ended", handleEnded);
-  audio.addEventListener("error", () => {
-    if (currentTrack?.recommendationId && audioRetryCount < 1) {
-      audioRetryCount++;
-      const failedTrack = currentTrack;
-      const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-      setPlayState('[重新检查音源]', false);
-      setTimeout(async () => {
-        if (currentTrack !== failedTrack) return;
-        audio.src = `${failedTrack.url}&retry=${Date.now()}`;
-        audio.addEventListener('loadedmetadata', () => { if (currentTrack === failedTrack && resumeAt > 0) audio.currentTime = resumeAt; }, { once: true });
-        try { await audio.play(); } catch { showNotice('音源仍不可用，可以重试或换一首'); }
-      }, 300);
-      return;
-    }
-    stopSpectrumMeter();
-    cancelVoicePipeline({ immediateRestore: true });
-    setPlayState("[音源错误]", false);
-    showNotice("音源播放失败，可以重试或换一首。");
-    setTransientPlayState(currentTrack?.blockReason || "[音源错误]");
-    resetLyricsDisplay("暂无歌词");
-    updateLikeButton();
-  });
+  audio.addEventListener("error", () => {if(audio.error)handleTrackFailure();});
 
   voiceAudio.addEventListener("loadedmetadata", updateHostCaptionDisplay);
   voiceAudio.addEventListener("timeupdate", updateHostCaptionDisplay);
@@ -894,6 +881,7 @@ async function loadPlaylistTracks(playlist, { append = false, force = false } = 
   document.querySelector("#playlistSummary").innerHTML = `${renderCover({ cover: playlist.cover })}<div><h2>${escapeHtml(playlist.name || "未命名歌单")}</h2><p>${Number(playlist.trackCount) || 0} 首 · ${escapeHtml(playlist.creator || "网易云音乐")}</p></div>`;
   setBusy(true, null, "tracks");
   if(!playlistTracks.length)playlistTracksList.innerHTML='<li class="list-empty" role="status">正在读取歌单…</li>';
+  playlistReason.setAttribute('data-state','loading');
   playlistReason.textContent = append ? "正在加载更多歌曲…" : "正在读取歌曲并检查播放权限…";
   try {
     const offset = append ? playlistTrackOffset : 0;
@@ -904,17 +892,18 @@ async function loadPlaylistTracks(playlist, { append = false, force = false } = 
     playlistTrackOffset = offset + page.length;
     moreTracksButton.hidden = page.length < PAGE_LOAD_SIZE || playlistTrackOffset >= Number(playlist.trackCount || Infinity);
     const count = playlistTracks.filter(isPlayable).length;
+    playlistReason.setAttribute('data-state',playlistTracks.length?'ready':'empty');
     playlistReason.textContent = playlistTracks.length ? `${count} 首可播放${playlistTracks.length > count ? ` · ${playlistTracks.length - count} 首受限` : ""}` : "这个歌单暂时没有歌曲。";
     renderResults(playlistTracksList, playlistTrackCount, playlistTracks, "首已加载");
     document.querySelector("#playlistBatchHint").textContent = `播放全部会替换队列；批量操作包含已加载的 ${count} 首可播歌曲（队列上限 ${MAX_QUEUE} 首）。`;
   } catch (error) {
-    if (version === playlistRequestVersion) { playlistReason.textContent = `读取失败：${error.message}。可点击刷新歌单内容重试，已有歌曲已保留。`; if(!playlistTracks.length)playlistTracksList.innerHTML='<li class="list-empty">暂时无法读取，请点击刷新重试</li>'; }
+    if (version === playlistRequestVersion) { playlistReason.setAttribute('data-state','error'); playlistReason.textContent = `读取失败：${error.message}。可点击刷新歌单内容重试，已有歌曲已保留。`; if(!playlistTracks.length)playlistTracksList.innerHTML='<li class="list-empty">暂时无法读取，请点击刷新重试</li>'; }
   } finally {
     if (version === playlistRequestVersion) setBusy(false, null, "tracks");
   }
 }
 
-function addPlayableTracks(tracks, { next = false, front = false } = {}) {
+function addPlayableTracks(tracks, { next = false, front = false, notify = true } = {}) {
   const playableTracks = tracks.filter(isPlayable).map(normalizeClientTrack);
   if (!playableTracks.length) { showNotice("没有可播放的歌曲"); return 0; }
   const currentKey = currentTrack ? trackKey(currentTrack) : "";
@@ -938,9 +927,9 @@ function addPlayableTracks(tracks, { next = false, front = false } = {}) {
   syncQueuePageToCurrent();
   // Adding songs should not reload lyrics or alter the current playback state.
   if (!currentKey) renderCurrentTrack();
-  renderQueue(); persistQueue();
+  renderQueue(); if(accepted.length)persistQueue();
   refreshResultActions();
-  showNotice(accepted.length ? `已${front ? "加入队首" : next ? "安排下一首播放" : "加入队尾"} ${accepted.length} 首${accepted.length < newTracks.length ? "，队列已满" : ""}` : newTracks.length ? "队列已满，请先移除部分歌曲" : "已在队列中");
+  if(notify)showNotice(accepted.length ? `已${front ? "加入队首" : next ? "安排下一首播放" : "加入队尾"} ${accepted.length} 首${accepted.length < newTracks.length ? "，队列已满" : ""}` : newTracks.length ? "队列已满，请先移除部分歌曲" : "已在队列中");
   return accepted.length;
 }
 
@@ -971,7 +960,7 @@ function refreshResultActions() {
   document.querySelectorAll("[data-add-track]").forEach(button => {
     const exists = queue.some(track => trackKey(track) === button.dataset.addTrack);
     button.disabled = exists || button.dataset.blocked === "true";
-    const label = exists ? "已在队列" : "加入队列";
+    const label = exists ? "已在播放队列" : "加入队列";
     button.title = label; button.setAttribute("aria-label", label);
     button.classList.toggle('is-added',exists);if(button.dataset.added!==String(exists)){button.innerHTML=icon(exists?'check':'queue');button.dataset.added=String(exists);}
   });
@@ -1051,11 +1040,7 @@ async function togglePlay() {
   }
 
   if (audio.error) {
-    const track = currentTrack, position = audio.currentTime;
-    const retry = new URL(track.url, location.href); retry.searchParams.set('retry',String(Date.now()));
-    audio.addEventListener('loadedmetadata',()=>{if(currentTrack===track && Number.isFinite(position) && position>0)audio.currentTime=position;},{once:true});
-    audio.src=retry.href;
-    await audio.play();
+    await playTrack(currentIndex);
   } else if (mediaControls?.buffering && !audio.paused) {
     audio.pause();
     await audio.play();
@@ -1066,6 +1051,44 @@ async function togglePlay() {
   }
 }
 
+function clearTrackLoading() {
+  clearTimeout(trackSlowTimer);clearTimeout(trackLoadTimer);
+  trackSlowTimer=trackLoadTimer=0;
+  if(activeTrackLoad)startupMessage('');
+  activeTrackLoad=null;playButton.removeAttribute('aria-busy');
+}
+
+function startTrackLoading() {
+  if(!currentTrack || activeTrackLoad?.attempt===playbackAttempt)return;
+  clearTrackLoading();
+  const attempt=playbackAttempt,track=currentTrack;
+  activeTrackLoad={attempt,key:trackKey(track)};
+  playButton.setAttribute('aria-busy','true');
+  startupMessage(`正在加载《${track.title || '歌曲'}》…`);
+  trackSlowTimer=setTimeout(()=>{
+    if(activeTrackLoad?.attempt===attempt)startupMessage(`网络响应较慢，仍在加载《${track.title || '歌曲'}》…`);
+  },4000);
+  trackLoadTimer=setTimeout(()=>{
+    if(activeTrackLoad?.attempt===attempt && !audio.paused && audio.readyState<3)handleTrackFailure('加载超时');
+  },25000);
+}
+
+function handleTrackFailure(reason='暂时无法播放') {
+  if(!currentTrack || failedPlaybackAttempt===playbackAttempt)return;
+  failedPlaybackAttempt=playbackAttempt;
+  const failed=currentTrack;
+  failedPlaybackTracks.add(trackKey(failed));
+  clearTrackLoading();stopSpectrumMeter();cancelVoicePipeline({immediateRestore:true});renderQueue();
+  const next=findNextPlayableIndex(currentIndex);
+  if(next<0){
+    audio.pause();setPlayState('[暂不可播放]',false);
+    startupMessage('当前队列暂时都无法播放，已暂停；点击歌曲可重试');
+    showNotice('当前队列暂时都无法播放，已停止自动切歌');return;
+  }
+  showNotice(`《${failed.title || '歌曲'}》${reason}，已跳到下一首`);
+  void playTrack(next);
+}
+
 async function playTrack(index, { throwPlaybackErrors = false } = {}) {
   audioRetryCount = 0;
   if (index < 0 || !queue[index] || !isPlayable(queue[index])) {
@@ -1073,6 +1096,9 @@ async function playTrack(index, { throwPlaybackErrors = false } = {}) {
     return;
   }
 
+  const attempt=++playbackAttempt;
+  failedPlaybackTracks.delete(trackKey(queue[index]));
+  clearTrackLoading();
   cancelVoicePipeline({ immediateRestore: true });
   spokenVoiceCueKeys = new Set();
   listeningController?.load(queue[index]);
@@ -1091,13 +1117,17 @@ async function playTrack(index, { throwPlaybackErrors = false } = {}) {
   audio.src = cached || currentTrack.url;
   recentAudioTrackKey=trackKey(currentTrack);
   audio.currentTime = 0;
+  startTrackLoading();
 
   try {
     await audio.play();
     maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
   } catch (error) {
-    setPlayState("[点击播放]", false);
+    if(attempt!==playbackAttempt)return;
+    if(error.name==='NotAllowedError'){
+      clearTrackLoading();setPlayState('[点击播放]',false);startupMessage('浏览器需要你点击播放才能继续');
+    }else if(error.name!=='AbortError')handleTrackFailure();
     if (throwPlaybackErrors) throw error;
   }
 }
@@ -1132,6 +1162,7 @@ function playNext() {
 }
 
 function handleEnded() {
+  clearTrackLoading();
   cancelVoicePipeline({ immediateRestore: true });
   listeningController?.complete();
   if (playMode === "single") return;
@@ -2088,7 +2119,6 @@ function handleVisibilityChange() {
     if(!audio.paused)startSpectrumMeter();
     refreshPlayStateForCurrent();
     mediaControls?.update();
-    externalAgentController?.refresh();
   }
   if (document.hidden) completeActiveDuckingAnimation();
   maybeStartHostIntroVoice();
@@ -2474,13 +2504,14 @@ function renderQueue() {
     const isCurrent = queueView === "queue" && index === currentIndex;
     const isLiked = isLikedTrack(track);
     const item = document.createElement("li");
-    item.className = `queue-item${isCurrent ? " is-active" : ""}`;
+    const unavailable=failedPlaybackTracks.has(trackKey(track));
+    item.className = `queue-item${isCurrent ? " is-active" : ""}${unavailable ? " is-disabled" : ""}`;
     item.innerHTML = `
       <span class="queue-index">${String(index + 1).padStart(2, "0")}</span>
-      <button class="track-play" type="button" aria-label="播放 ${escapeHtml(track.title)}" title="播放">${renderCover(track)}</button>
+      <button class="track-play" type="button" aria-label="${unavailable ? "重试播放" : "播放"} ${escapeHtml(track.title)}" title="${unavailable ? "暂时不可用，点击重试" : "播放"}">${renderCover(track)}</button>
       <div class="queue-title">
         <strong>${renderTrackTitle(track, "未命名")}</strong>
-        <span>${escapeHtml([track.artist, track.album].filter(Boolean).join(" / ") || "未知艺人")}</span>
+        <span>${escapeHtml(unavailable ? "暂时不可用 · 点击播放可重试" : [track.artist, track.album].filter(Boolean).join(" / ") || "未知艺人")}</span>
       </div>
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
       <div class="queue-actions">
@@ -2853,6 +2884,7 @@ function activateTab(tab) {
     button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
     pane.classList.toggle("is-active", selected); pane.hidden = !selected;
   }
+  if (activeWorkspace === "ai") void externalAgentController?.open();
   if (activeWorkspace === "playlists" && !playlistsLoaded && !busyScopes.has("library")) void loadUserPlaylists();
 }
 
@@ -3016,7 +3048,7 @@ function findNextPlayableIndex(fromIndex) {
 
   for (let offset = 1; offset <= queue.length; offset += 1) {
     const index = (Math.max(fromIndex, 0) + offset) % queue.length;
-    if (isPlayable(queue[index])) return index;
+    if (isPlayable(queue[index]) && !failedPlaybackTracks.has(trackKey(queue[index]))) return index;
   }
 
   return -1;
@@ -3027,7 +3059,7 @@ function findPreviousPlayableIndex(fromIndex) {
 
   for (let offset = 1; offset <= queue.length; offset += 1) {
     const index = (Math.max(fromIndex, 0) - offset + queue.length) % queue.length;
-    if (isPlayable(queue[index])) return index;
+    if (isPlayable(queue[index]) && !failedPlaybackTracks.has(trackKey(queue[index]))) return index;
   }
 
   return -1;
@@ -3035,7 +3067,7 @@ function findPreviousPlayableIndex(fromIndex) {
 
 function findRandomPlayableIndex(fromIndex) {
   const playableIndexes = queue
-    .map((track, index) => (isPlayable(track) ? index : -1))
+    .map((track, index) => (isPlayable(track) && !failedPlaybackTracks.has(trackKey(track)) ? index : -1))
     .filter((index) => index !== -1);
 
   if (!playableIndexes.length) return -1;
@@ -3202,7 +3234,7 @@ async function saveQueue() {
     while (queueDirty && !queueConflict) {
       const version = queueMutationVersion;
       const response = await apiFetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queue, currentIndex, expectedRevision: serverQueueRevision }) });
+        body: JSON.stringify({ queue, currentIndex, expectedRevision: serverQueueRevision }), signal:AbortSignal.timeout(15000) });
       const saved = await response.json();
       if (response.status === 409) {
         queueConflict = true; document.querySelector('#queueConflictPanel').hidden = false;
@@ -3320,7 +3352,6 @@ async function resolveQueueConflict(keepLocal) {
       serverQueueRevision = -1; // Force an explicit user-authorized reconciliation.
       await syncExternalQueue(latest);
     }
-    void externalAgentController?.refresh();
   } catch (error) { showNotice(error.message); }
 }
 
@@ -3361,9 +3392,52 @@ async function executeExternalCommand(command) {
   return 'playing';
 }
 
+async function refreshSharedLikes() {
+  await restoreLikedTracks();
+  renderQueue(); updateLikeButton();
+  try {
+    const data = await getJson('/api/player/feedback', {headers:{'X-Awudio-Browser':'1'},cache:'no-store'});
+    syncExternalFeedback(data.feedback || []);
+  } catch (error) { showNotice(error.message); }
+}
+
+async function refreshSharedQueue() {
+  try {
+    if (!await flushQueueWrites()) return;
+    await syncExternalQueue(await getJson('/api/queue'));
+  } catch (error) { showNotice(error.message); }
+}
+
+async function applyRecommendationPlan(plan, queueMode, playback) {
+  if(queueConflict)throw new Error('队列存在冲突，请先选择使用云端或本机队列');
+  const tracks = dedupeTracks(plan.tracks.filter(isPlayable).map(normalizeClientTrack));
+  if (!tracks.length) throw new Error('没有可播放的歌曲');
+  if (queueMode === 'append') {
+    const existing=new Set(queue.map(trackKey));
+    const missing=tracks.filter(track=>!existing.has(trackKey(track))).length;
+    if(!missing)return {changed:false,message:'这些歌曲已在队列中'};
+    if(queue.length>=MAX_QUEUE)throw new Error('队列已满，请先移除部分歌曲');
+    const count=addPlayableTracks(tracks,{notify:false});
+    return {changed:count>0,count,skipped:missing-count};
+  }
+  if (queueMode === 'replace_upcoming') {
+    const loaded = audio.currentSrc && currentTrack ? currentTrack : null;
+    queue = (loaded ? [loaded, ...tracks.filter(t => trackKey(t) !== trackKey(loaded))] : tracks).slice(0, MAX_QUEUE);
+    currentIndex = loaded ? 0 : resolvePlayableIndex(queue);
+    currentTrack = loaded || queue[currentIndex] || null;
+    if (!loaded) renderCurrentTrack();
+    syncQueuePageToCurrent(); renderQueue(); persistQueue(); refreshResultActions();
+    return {changed:true,count:tracks.length};
+  }
+  replaceQueueWithTracks(tracks, {fullPlaylist:true});
+  if (playback === 'play_first') void playTrack(currentIndex);
+  return {changed:true,count:tracks.length};
+}
+
 function renderExternalPlans(plans, apply) {
   const target = document.querySelector('#agentPlans'), scrollTop=target.scrollTop;
   const expanded=new Set([...target.querySelectorAll('.agent-plan-reasons[open]')].map(n=>n.closest('.agent-plan').dataset.planId));
+  target.querySelectorAll('.agent-plan').forEach(card=>card.planActionCleanup?.());
   target.replaceChildren();
   for (const plan of plans) {
     const article = document.createElement('article'); article.className = 'agent-plan'; article.dataset.planId=plan.id;
@@ -3380,12 +3454,29 @@ function renderExternalPlans(plans, apply) {
       if (track.reasonSummary) { const reason = document.createElement('p'); reason.textContent = `${track.title}：${track.reasonSummary}`; reasons.append(reason); }
     }
     const actions = document.createElement('div'); actions.className = 'agent-plan-actions';
-    const actionButtons = [];
+    const actionButtons = [],labels=new Map();
+    const actionStatus=document.createElement('p');actionStatus.className='view-status';actionStatus.hidden=true;
+    actionStatus.setAttribute('role','status');actionStatus.setAttribute('aria-live','polite');
+    function updateAction(state) {
+      if(!state)return;
+      const busy=['applying','saving'].includes(state.stage);
+      if(busy)article.setAttribute('aria-busy','true');else article.removeAttribute('aria-busy');
+      actionStatus.hidden=false;actionStatus.textContent=state.text;actionStatus.dataset.state=state.stage;
+      for(const button of actionButtons){
+        button.disabled=busy;
+        const item=labels.get(button);if(!item)continue;
+        const active=item.queueMode===state.queueMode && item.playback===state.playback;
+        item.node.textContent=active && state.stage==='pending_sync'?'重试同步':active && busy?(state.stage==='saving'?'同步中…':state.queueMode==='append'?'加入中…':'处理中…'):item.label;
+      }
+    }
     async function run(queueMode, playback) {
-      closeQueueMenus(); article.setAttribute('aria-busy', 'true');
-      actionButtons.forEach(button => { button.disabled = true; });
-      try { await apply(plan.id, queueMode, playback); }
-      finally { article.removeAttribute('aria-busy'); actionButtons.forEach(button => { button.disabled = false; }); }
+      if(article.hasAttribute('aria-busy'))return;
+      closeQueueMenus();
+      updateAction({stage:'applying',queueMode,playback,text:queueMode==='append'?'正在加入队列…':'正在准备歌曲…'});
+      try {
+        const result=await apply(plan.id,queueMode,playback,apply.subscribe?undefined:updateAction);
+        if(!apply.subscribe)updateAction(result || {stage:'complete',queueMode,playback,text:'队列已更新'});
+      }catch(error){updateAction({stage:'error',queueMode,playback,text:`操作失败：${error.message}`});showNotice(error.message);}
     }
     for (const [label, symbol, css, queueMode, playback] of [
       ['播放', 'play-fill', '', 'replace_all', 'play_first'],
@@ -3393,6 +3484,7 @@ function renderExternalPlans(plans, apply) {
     ]) {
       const button = document.createElement('button'); button.className = `workspace-action ${css}`; button.type = 'button';
       button.innerHTML = icon(symbol); const labelNode = document.createElement('span'); labelNode.textContent = label; button.append(labelNode);
+      labels.set(button,{node:labelNode,label,queueMode,playback});
       button.title = playback === 'play_first' ? '播放这份推荐并替换队列' : '加入队尾，保持当前播放';
       button.disabled = false; button.addEventListener('click', () => run(queueMode, playback));
       actionButtons.push(button); actions.append(button);
@@ -3408,7 +3500,8 @@ function renderExternalPlans(plans, apply) {
     makeRadio.addEventListener('click',()=>{void radioStudio.open('plan',plan.id);});actions.insertBefore(makeRadio,more);
     article.append(title, meta, list);
     if (reasons.children.length > 1) article.append(reasons);
-    article.append(actions, menu); target.append(article);
+    article.append(actions, actionStatus, menu); target.append(article);
+    if(apply.subscribe)article.planActionCleanup=apply.subscribe(plan.id,updateAction);
   }
   target.scrollTop=scrollTop;
 }

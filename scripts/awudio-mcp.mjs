@@ -5,15 +5,15 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { schemas, descriptions, writes } from '../lib/agent/schemas.mjs';
 import { validateBridge } from '../lib/agent/connection.mjs';
-import { createHeartbeat, createAgentActivity } from '../lib/agent/heartbeat.mjs';
+import { AGENT_SESSION_MS, createAgentActivity } from '../lib/agent/heartbeat.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const configFile = process.env.AWUDIO_BRIDGE_FILE ? resolve(process.env.AWUDIO_BRIDGE_FILE) : resolve(process.env.AWUDIO_DATA_DIR || resolve(root, 'data'), 'agent-bridge.json');
 const server = new McpServer({ name: 'awudio', version: '0.2.0' }, {
-  instructions: 'Awudio 私人音乐工具。支持本机或已配置的 HTTPS 音乐服务。对话留在当前 Agent；仅按用户需求查询、提交或播放。问候不推荐。先读 context，歧义查音乐人详情并必要时追问；工具回执确认后才能报告已播放。',
+  instructions: 'Awudio 私人音乐工具。支持本机或已配置的 HTTPS 音乐服务。对话留在当前 Agent；仅按用户需求查询、提交或播放。推荐默认保存到云端，用户在网页刷新获取后自行播放，无需网页在线；保存成功不代表已展示或已播放。问候不推荐。先读 context，歧义查音乐人详情并必要时追问；工具回执确认后才能报告已播放。',
 });
 let configuration, sessionId, registering;
-const activity=createAgentActivity();
+const activity=createAgentActivity({sessionMs:AGENT_SESSION_MS-5000});
 // 网页显示的名字取自这里。部分客户端把连接器占位名当客户端名上报（WorkBuddy 上报 "awudio"），
 // 这种占位名直接展示会让人以为是其它 Agent，映射成产品名。需要固定名字时用 AWUDIO_AGENT_NAME 覆盖。
 const AGENT_NAME_OVERRIDE = process.env.AWUDIO_AGENT_NAME?.trim() || null;
@@ -64,17 +64,5 @@ for (const [name, schema] of Object.entries(schemas)) {
     }
   });
 }
-const keepAlive = createHeartbeat({
-  connect: ensureSession,
-  ping: async () => {
-    const { response } = await request('/api/agent/heartbeat', { name: clientName() });
-    if (!response.ok) throw new Error('heartbeat_rejected');
-  },
-  invalidate: () => { sessionId = null; configuration = null; },
-});
-const heartbeat = setInterval(() => {
-  if (server.server.getClientVersion() && activity.active) void keepAlive();
-}, 15000);
-heartbeat.unref();
 await server.connect(new StdioServerTransport());
-for (const name of ['SIGINT', 'SIGTERM']) process.once(name, async () => { clearInterval(heartbeat); await server.close(); process.exit(0); });
+for (const name of ['SIGINT', 'SIGTERM']) process.once(name, async () => { await server.close(); process.exit(0); });

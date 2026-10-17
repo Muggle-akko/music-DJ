@@ -36,9 +36,10 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function listen(server) { server.listen(0,'127.0.0.1');await once(server,'listening');return server.address().port; }
 
 test('server HTTP: private media, owner login, device queues, remote Agent scope and restart persistence', async () => {
-  let upstreamBase, mediaCalls=0, loginAvailable=true, lyricCalls=0;
+  let upstreamBase, mediaCalls=0, loginAvailable=true, lyricCalls=0, catalogCalls=0;
   const upstream=createServer((req,res)=>{
     const url=new URL(req.url,'http://fixture');
+    if(url.pathname==='/song/detail' || url.pathname.startsWith('/song/url'))catalogCalls++;
     let data={code:200};
     if(url.pathname==='/login/status') {
       const valid=loginAvailable && req.headers.cookie?.includes('MUSIC_U=valid');
@@ -121,6 +122,25 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
     assert.equal((await request('/api/agent/register',{auth:false,body:{name:'Remote Agent'},headers:{Authorization:'Bearer wrong'}})).status,401);
     const agent=(await request('/api/agent/register',{auth:false,body:{name:'Remote Agent'},headers:{Authorization:`Bearer ${bridge.token}`}})).data;
     assert.ok(agent.sessionId);
+    // Recommendations can be published with no browser/player and the default mode.
+    const offlineHeaders={Authorization:`Bearer ${bridge.token}`,'X-Awudio-Agent-Session':agent.sessionId};
+    const offlineSearch=(await request('/api/agent/call',{auth:false,body:{tool:'awudio_search_tracks',args:{query:'Fixture'}},headers:offlineHeaders})).data;
+    const offlinePlan=await request('/api/agent/call',{auth:false,body:{tool:'awudio_submit_plan',args:{operationId:'offline-plan',intent:'recommend',requestSummary:'Offline plan',tracks:[{trackId:'3',lookupRef:offlineSearch.lookupRef,evidenceRefs:offlineSearch.tracks[0].evidenceRefs,reason:'Fixture'}]}},headers:offlineHeaders});
+    assert.equal(offlinePlan.status,200);assert.equal(offlinePlan.data.saved,true);assert.equal(offlinePlan.data.displayed,false);assert.equal(offlinePlan.data.delivery,'pull');
+    const inbox=await request('/api/player/recommendations',{headers:{'X-Awudio-Browser':'1'}});
+    assert.equal(inbox.status,200);assert.equal(inbox.data.plans[0].id,offlinePlan.data.planId);
+    assert.equal(inbox.data.queue,undefined);assert.equal(inbox.data.players,undefined);assert.equal(inbox.data.plans[0].ownerAccountKey,undefined);
+    assert.equal((await request('/api/queue')).data.queue[0].id,'1');
+    assert.equal((await request('/api/player/recommendations',{device:deviceB,headers:{'X-Awudio-Browser':'1'}})).data.plans[0].id,offlinePlan.data.planId);
+    const unchanged=await request('/api/player/recommendations',{headers:{'X-Awudio-Browser':'1','X-Awudio-Plans-Version':inbox.data.plansVersion}});
+    assert.equal(unchanged.data.plansUnchanged,true);assert.equal(unchanged.data.plans,undefined);
+    assert.equal((await request('/api/player/recommendations',{auth:false,headers:{'X-Awudio-Browser':'1'}})).status,401);
+    assert.equal((await request('/api/player/recommendations',{auth:false,headers:{...offlineHeaders,'X-Awudio-Browser':'1'}})).status,401);
+    const preference=await request('/api/agent/call',{auth:false,body:{tool:'awudio_record_feedback',args:{operationId:'offline-like',trackId:'3',action:'like'}},headers:offlineHeaders});
+    assert.equal(preference.status,200);
+    const preferences=await request('/api/player/feedback',{headers:{'X-Awudio-Browser':'1'}});
+    assert.equal(preferences.status,200);assert.equal(preferences.data.feedback[0].trackId,'3');assert.equal(preferences.data.feedback[0].liked,true);
+    assert.equal((await request('/api/player/feedback',{auth:false,headers:{'X-Awudio-Browser':'1'}})).status,401);
     const register=await request('/api/player/register',{body:{name:'iPad'},headers:{'X-Awudio-Browser':'1'}});
     const player=register.data;
     const playerHeaders={'X-Awudio-Browser':'1','X-Awudio-Player-Token':player.token};
@@ -132,8 +152,10 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
     const search=(await request('/api/agent/call',{auth:false,body:{tool:'awudio_search_tracks',args:{query:'Fixture'}},headers:agentHeaders})).data;
     const plan=(await request('/api/agent/call',{auth:false,body:{tool:'awudio_submit_plan',args:{operationId:'submit-plan',intent:'recommend',requestSummary:'Fixture plan',tracks:[{trackId:'3',lookupRef:search.lookupRef,evidenceRefs:search.tracks[0].evidenceRefs,reason:'Fixture selection'}]}},headers:agentHeaders})).data;
     assert.ok(plan.planId);
+    const callsBeforeApply=catalogCalls;
     const applied=await request('/api/agent/call',{auth:false,body:{tool:'awudio_apply_plan',args:{operationId:'apply-plan',planId:plan.planId,targetPlayerId:player.playerId,expectedRevision:1,queueMode:'append',playback:'keep'}},headers:agentHeaders});
     assert.equal(applied.status,200);
+    assert.equal(catalogCalls,callsBeforeApply,'enqueue must not recheck every track with the upstream catalog');
     assert.deepEqual((await request('/api/queue')).data.queue.map(t=>t.id),['1','3']);
     assert.equal((await request('/api/queue',{device:deviceB})).data.queue[0].id,'2');
 
@@ -158,6 +180,7 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
     assert.equal((await request('/api/queue')).data.queue[0].id,'1');
     assert.equal((await request('/api/queue',{device:deviceB})).data.queue[0].id,'2');
     assert.equal((await request('/api/radios')).data.radios[0].title,'Shared episode');
+    assert.ok((await request('/api/player/recommendations',{headers:{'X-Awudio-Browser':'1'}})).data.plans.some(p=>p.id===offlinePlan.data.planId));
     loginAvailable=true;
     assert.equal((await request('/api/instance')).data.authenticated,true);
     assert.ok(JSON.parse(await readFile(join(dir,'browser-sessions.json'),'utf8')).sessions);

@@ -19,7 +19,7 @@ function harness() {
     return nodes.get(id);
   };
   const context = {
-    queue: [], currentIndex: -1, currentTrack: null, MAX_QUEUE: 200, PLAYLIST_RECOMMENDATION_LIMIT: 30,
+    queueConflict:false, queue: [], currentIndex: -1, currentTrack: null, MAX_QUEUE: 200, PLAYLIST_RECOMMENDATION_LIMIT: 30,
     audio: { paused:true, currentTime:12, addEventListener() {}, pause() {}, removeAttribute() {}, load() {} }, cancelVoicePipeline() {}, syncQueueTabs() {},
     renderCount: 0, notices: [],
     normalizeClientTrack: value => ({ ...value }), isPlayable: value => value.playable && !!value.url,
@@ -39,7 +39,7 @@ function harness() {
     setBusy(busy, _, scope) { if (busy) context.busyScopes.add(scope); else context.busyScopes.delete(scope); },
   };
   vm.createContext(context);
-  vm.runInContext(['trackKey', 'bindTrackRow', 'addPlayableTracks', 'scheduleNextTrack', 'replaceQueueWithTracks', 'loadPlaylistTracks', 'loadUserPlaylists'].map(functionSource).join('\n'), context);
+  vm.runInContext(['trackKey', 'bindTrackRow', 'addPlayableTracks', 'scheduleNextTrack', 'replaceQueueWithTracks', 'applyRecommendationPlan', 'loadPlaylistTracks', 'loadUserPlaylists'].map(functionSource).join('\n'), context);
   return context;
 }
 
@@ -183,9 +183,63 @@ test('a failed startup read leaves the recent cached song ready to play',async()
 });
 test('playing a cached track invokes audio.play inside the original click gesture',async()=>{
   const calls=[];
-  const h={queue:[track('1')],trackKey:t=>t.id,isPlayable:()=>true,cloudQueueReady:true,playMode:'single',recentPlayback:{sourceFor:()=> 'blob:cached'},
+  const h={playbackAttempt:0,failedPlaybackTracks:new Set(),clearTrackLoading(){},startTrackLoading(){},queue:[track('1')],trackKey:t=>t.id,isPlayable:()=>true,cloudQueueReady:true,playMode:'single',recentPlayback:{sourceFor:()=> 'blob:cached'},
     cancelVoicePipeline(){},listeningController:null,crypto:{randomUUID:()=> 'session'},syncQueuePageToCurrent(){},renderCurrentTrack(){},renderQueue(){},persistQueue(){},
     sourceValue:{},translateSource:()=> '网易云',audio:{play(){calls.push('play');return Promise.resolve();}},maybeStartHostIntroVoice(){},scheduleHostIntroVoiceCheck(){}};
   vm.createContext(h);vm.runInContext(functionSource('playTrack'),h);
   const playing=h.playTrack(0);assert.deepEqual(calls,['play']);assert.equal(h.audio.src,'blob:cached');await playing;
+});
+
+
+test('stored recommendation replaces upcoming tracks without touching loaded audio',async()=>{
+ const h=harness();h.queue=['a','b','c'].map(track);h.currentIndex=1;h.currentTrack=h.queue[1];h.audio.currentSrc='/stream/b';
+ const current=h.currentTrack;
+ await h.applyRecommendationPlan({tracks:['b','d','d','e'].map(track)},'replace_upcoming','keep');
+ assert.equal(h.queue.map(t=>t.id).join(','),'b,d,e');assert.equal(h.currentTrack,current);assert.equal(h.currentIndex,0);assert.equal(h.renderCount,0);
+});
+test('stored recommendations play through local queue and append without remote player registration',async()=>{
+ const h=harness();let played=null;h.playTrack=async index=>{played=h.queue[index].id;};
+ await h.applyRecommendationPlan({tracks:['a','b'].map(track)},'replace_all','play_first');assert.equal(played,'a');
+ await h.applyRecommendationPlan({tracks:['b','c'].map(track)},'append','keep');assert.equal(h.queue.map(t=>t.id).join(','),'a,b,c');assert.equal(played,'a');
+});
+
+function playbackFailureHarness() {
+  const h={queue:['a','b','c'].map(track),currentIndex:0,playbackAttempt:1,failedPlaybackAttempt:-1,failedPlaybackTracks:new Set(),
+    notices:[],messages:[],paused:0,played:[],clearTrackLoading(){},stopSpectrumMeter(){},cancelVoicePipeline(){},renderQueue(){},setPlayState(){},
+    audio:{pause(){h.paused++;}},startupMessage:text=>h.messages.push(text),showNotice:text=>h.notices.push(text),isPlayable:t=>t.playable,
+    playTrack:index=>{h.played.push(index);h.currentIndex=index;h.currentTrack=h.queue[index];h.playbackAttempt++;}};
+  h.currentTrack=h.queue[0];vm.createContext(h);
+  vm.runInContext(['trackKey','findNextPlayableIndex','handleTrackFailure'].map(functionSource).join('\n'),h);return h;
+}
+test('unavailable tracks are skipped once and an entirely unavailable queue stops',()=>{
+  const h=playbackFailureHarness();
+  h.handleTrackFailure();h.handleTrackFailure();h.handleTrackFailure();h.handleTrackFailure();
+  assert.deepEqual(h.played,[1,2]);assert.equal(h.failedPlaybackTracks.size,3);assert.equal(h.paused,1);
+  assert.match(h.messages.at(-1),/已暂停/);assert.equal(h.findNextPlayableIndex(2),-1);
+});
+test('loading feedback escalates for slow requests, times out, and ignores cleared timers',()=>{
+  let serial=0;const timers=new Map(),messages=[],failures=[];
+  const h={trackSlowTimer:0,trackLoadTimer:0,activeTrackLoad:null,currentTrack:track('a'),playbackAttempt:1,trackKey:t=>t.id,
+    audio:{paused:false,readyState:0},playButton:{setAttribute(){},removeAttribute(){}},startupMessage:text=>messages.push(text),handleTrackFailure:reason=>failures.push(reason),
+    setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)};
+  vm.createContext(h);vm.runInContext(['clearTrackLoading','startTrackLoading'].map(functionSource).join('\n'),h);
+  h.startTrackLoading();assert.match(messages.at(-1),/正在加载/);assert.equal(timers.size,2);
+  const slow=[...timers.values()].find(t=>t.ms===4000),timeout=[...timers.values()].find(t=>t.ms===25000);
+  slow.fn();assert.match(messages.at(-1),/网络响应较慢/);timeout.fn();assert.deepEqual(failures,['加载超时']);
+  h.clearTrackLoading();assert.equal(timers.size,0);slow.fn();timeout.fn();assert.equal(messages.at(-1),'');assert.equal(failures.length,1);
+});
+test('browser autoplay restrictions prompt for a click without marking the song unavailable',async()=>{
+  let failed=0;const messages=[];
+  const h={playbackAttempt:0,failedPlaybackTracks:new Set(),clearTrackLoading(){},startTrackLoading(){},queue:[track('a')],trackKey:t=>t.id,isPlayable:()=>true,cloudQueueReady:false,
+    playMode:'list',recentPlayback:{sourceFor:()=>null},cancelVoicePipeline(){},listeningController:null,crypto:{randomUUID:()=> 's'},syncQueuePageToCurrent(){},renderCurrentTrack(){},renderQueue(){},
+    sourceValue:{},translateSource:()=> '网易云',audio:{play:async()=>{throw Object.assign(new Error('gesture'),{name:'NotAllowedError'});}},
+    handleTrackFailure:()=>failed++,setPlayState(){},startupMessage:text=>messages.push(text)};
+  vm.createContext(h);vm.runInContext(functionSource('playTrack'),h);await h.playTrack(0);
+  assert.equal(failed,0);assert.match(messages.at(-1),/点击播放/);
+});
+test('starting a recommendation does not wait for slow audio before confirming its local queue change',async()=>{
+  const h=harness();let started=false;
+  h.playTrack=()=>{started=true;return new Promise(()=>{});};
+  const result=await h.applyRecommendationPlan({tracks:[track('a')]},'replace_all','play_first');
+  assert.equal(started,true);assert.equal(result.changed,true);assert.equal(result.count,1);assert.equal(h.queue[0].id,'a');
 });
