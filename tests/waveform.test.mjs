@@ -79,3 +79,8 @@ test('switching songs during a download discards stale previews',async()=>{
   await waveform.load('new');release(fixture(Array(200).fill(0.8)));await old;
   assert.equal(waveform.ready,true);assert.equal(waveform.level(1,0,36),6);
 });
+test('completed mobile waveform download can also populate the recent song cache',async()=>{
+ const captured=[];
+ const waveform=createTrackWaveform({fetchAudio:async()=>new Response(new Uint8Array([1,2]),{headers:{'content-type':'audio/mpeg'}}),decode:async()=>fixture(Array(100).fill(0.5)),onAudioLoaded:(url,bytes,type)=>captured.push({url,bytes:[...bytes],type})});
+ await waveform.load('/song');assert.deepEqual(captured,[{url:'/song',bytes:[1,2],type:'audio/mpeg'}]);
+});

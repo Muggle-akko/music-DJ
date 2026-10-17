@@ -153,3 +153,39 @@ test('cover failures retry twice without replacing the image or retrying detache
   const detached={...image,dataset:{},style:{},isConnected:false};const src=detached.src;
   h.retryCover(detached);jobs.shift()();assert.equal(detached.src,src);
 });
+
+function startupQueueHarness(getJson) {
+  const local=track('recent');
+  const h={getJson,AbortSignal,queueMutationVersion:0,queueDirty:false,queueConflict:false,cloudQueueReady:false,
+    serverQueueRevision:0,queue:[local],currentIndex:0,currentTrack:local,localPlaybackPreview:true,MAX_QUEUE:200,
+    audio:{paused:false,currentTime:18,currentSrc:'blob:cached'},isPlayable:t=>t.playable,
+    normalizeClientTrack:t=>({...t}),trackKey:t=>t?.id,trimQueueKeepingCurrent:items=>items,
+    resolvePlayableIndex:items=>items.length?0:-1,saveQueueFallback(){},syncQueuePageToCurrent(){},renderCurrentTrack(){},renderQueue(){},
+    startupMessage:text=>{h.message=text;},document:{querySelector:()=>h.conflictPanel},conflictPanel:{hidden:true}};
+  vm.createContext(h);vm.runInContext(functionSource('restoreCloudQueue'),h);return h;
+}
+test('initial cloud synchronization keeps the recent cached song and does not interrupt playback',async()=>{
+  const h=startupQueueHarness(async()=>({revision:4,currentIndex:0,queue:[track('cloud')]}));
+  await h.restoreCloudQueue();
+  assert.equal(h.currentTrack.id,'recent');assert.equal(h.queue.length,2);assert.equal(h.audio.paused,false);assert.equal(h.audio.currentTime,18);
+  assert.equal(h.serverQueueRevision,4);assert.equal(h.cloudQueueReady,true);
+});
+test('late startup reads do not overwrite user edits made while the cloud was loading',async()=>{
+  let release;
+  const h=startupQueueHarness(()=>new Promise(resolve=>{release=resolve;}));
+  const pending=h.restoreCloudQueue();h.queueMutationVersion++;h.queue=[track('user-edit')];h.queueDirty=true;
+  release({revision:5,queue:[track('cloud')],currentIndex:0});await pending;
+  assert.equal(h.queue[0].id,'user-edit');assert.equal(h.queueConflict,true);assert.equal(h.conflictPanel.hidden,false);
+});
+test('a failed startup read leaves the recent cached song ready to play',async()=>{
+  const h=startupQueueHarness(async()=>{throw new Error('offline');});
+  await h.restoreCloudQueue();assert.equal(h.currentTrack.id,'recent');assert.equal(h.cloudQueueReady,false);assert.match(h.message,/本机/);
+});
+test('playing a cached track invokes audio.play inside the original click gesture',async()=>{
+  const calls=[];
+  const h={queue:[track('1')],trackKey:t=>t.id,isPlayable:()=>true,cloudQueueReady:true,playMode:'single',recentPlayback:{sourceFor:()=> 'blob:cached'},
+    cancelVoicePipeline(){},listeningController:null,crypto:{randomUUID:()=> 'session'},syncQueuePageToCurrent(){},renderCurrentTrack(){},renderQueue(){},persistQueue(){},
+    sourceValue:{},translateSource:()=> '网易云',audio:{play(){calls.push('play');return Promise.resolve();}},maybeStartHostIntroVoice(){},scheduleHostIntroVoiceCheck(){}};
+  vm.createContext(h);vm.runInContext(functionSource('playTrack'),h);
+  const playing=h.playTrack(0);assert.deepEqual(calls,['play']);assert.equal(h.audio.src,'blob:cached');await playing;
+});

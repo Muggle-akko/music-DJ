@@ -1,15 +1,16 @@
-import { createTrackWaveform } from "/waveform.mjs?v=38";
+import { recentPlayback } from '/recent-playback.mjs?v=46';
+import { createTrackWaveform } from "/waveform.mjs?v=46";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=44";
+import { createMobileWorkspace } from "/mobile.mjs?v=46";
 import { createMediaSession } from "/media-session.mjs?v=36";
-import { browserDataCache, apiFetch } from "/network.mjs?v=44";
+import { browserDataCache, apiFetch } from "/network.mjs?v=46";
 import { createListeningController } from "/listening.mjs?v=36";
-import { createAgentController } from "/agent.mjs?v=44";
-import { createRadioStudio } from "/radio.mjs?v=44";
+import { createAgentController } from "/agent.mjs?v=46";
+import { createRadioStudio } from "/radio.mjs?v=46";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
-const trackWaveform = createTrackWaveform();
+const trackWaveform = createTrackWaveform({onAudioLoaded:(url,bytes,type)=>recentPlayback.storeBytes(url,bytes,type)});
 const aiInput = document.querySelector("#aiInput");
 const aiComposer = document.querySelector("#aiComposer");
 const searchInput = document.querySelector("#searchInput");
@@ -215,9 +216,16 @@ let spectrumLevels = Array.from({ length: SEGMENT_COUNT }, () => 12);
 let spectrumFallVelocity = Array.from({ length: SEGMENT_COUNT }, () => 0);
 
 let mediaControls, mobileWorkspace;
+let cloudQueueReady=false;
+let recentCacheTimer=0;
+let recentSaveAt=0;
+let recentAudioTrackKey='';
+let queueRestoreJob=null;
+let localPlaybackPreview=false;
+let startupAccount='';
 let narrationEnabled=localStorage.getItem("awudio.narrationEnabled")!=="false";
 const queueViewScroll=new Map();
-init();
+queueMicrotask(()=>{void init().catch(()=>{document.documentElement.classList.remove('app-booting');startupMessage('页面准备失败，请刷新重试');});});
 
 async function init() {
   mobileWorkspace=createMobileWorkspace({getTrack:()=>currentTrack,onLocate:locateCurrentTrack});
@@ -233,10 +241,24 @@ async function init() {
   bindEvents();
   setPlayMode(playMode);
   setVolume(volume, { save: false });
+  if('serviceWorker' in navigator)void navigator.serviceWorker.register('/sw.js?v=46').catch(()=>{});
+  restoreLocalPlayback();
+  requestAnimationFrame(()=>{
+    document.documentElement.classList.remove('app-booting');
+    document.querySelector('#startupSkeleton')?.remove();
+  });
+  window.setTimeout(()=>document.documentElement.classList.remove('app-booting'),3000);
   const configReady=loadConfig().catch(()=>{brainStatus.textContent='[配置暂不可用]';});
   await loadNeteaseAccount();
-  scopeBrowserStorage(accountUserId || 'guest');
-  browserDataCache.useScope(accountUserId || 'guest');
+  if(accountUserId){
+    if(startupAccount && startupAccount!==accountUserId){
+      audio.pause();audio.removeAttribute('src');audio.load();queue=[];currentTrack=null;currentIndex=-1;localPlaybackPreview=false;
+    }
+    await recentPlayback.useScope(accountUserId);
+    localStorage.setItem('awudio.lastAccountId',accountUserId);
+  }
+  scopeBrowserStorage(accountUserId || startupAccount || 'guest');
+  browserDataCache.useScope(accountUserId || startupAccount || 'guest');
   likedTrackKeys = loadLikedTrackKeys();
   likedTracks = loadLikedTracks();
   aiChatMessages = loadAiChatMessages();
@@ -260,14 +282,42 @@ async function init() {
   });
   void loadProfileStatus();
   loadWeatherInfo();
+}
 
-  if ("serviceWorker" in navigator) {
-    try {
-      await navigator.serviceWorker.register("/sw.js?v=44");
-    } catch {
-      // PWA cache is optional.
-    }
+function startupMessage(text) {
+  const node=document.querySelector('#startupStatus');
+  if(node){node.textContent=text;node.hidden=!text;}
+}
+
+function restoreLocalPlayback() {
+  const saved=recentPlayback.read();
+  startupAccount=saved?.accountId || localStorage.getItem('awudio.lastAccountId') || localStorage.getItem('awudio.legacyStorageOwner') || '';
+  if(startupAccount){browserDataCache.useScope(startupAccount);void recentPlayback.useScope(startupAccount);}
+  if(!saved || !isPlayable(saved.track)){
+    startupMessage('正在同步音乐库…');
+    queueList.innerHTML=Array.from({length:4},()=>'<li class="startup-row" aria-hidden="true"><span class="startup-art"></span><span class="startup-line"></span></li>').join('');
+    return;
   }
+  queue=[normalizeClientTrack(saved.track)];currentIndex=0;currentTrack=queue[0];localPlaybackPreview=true;
+  renderCurrentTrack();renderQueue();
+  startupMessage('已恢复上次的歌曲，正在同步音乐库…');
+  void recentPlayback.cachedSource(currentTrack).then(source=>{
+    if(!source || !localPlaybackPreview || trackKey(currentTrack)!==trackKey(saved.track) || audio.currentSrc)return;
+    const track=currentTrack;
+    audio.addEventListener('loadedmetadata',()=>{
+      if(trackKey(currentTrack)===trackKey(track) && Number.isFinite(audio.duration))audio.currentTime=Math.min(saved.position,Math.max(0,audio.duration-3));
+      updateProgress();
+    },{once:true});
+    audio.src=source;recentAudioTrackKey=trackKey(currentTrack);audio.load();
+    startupMessage(cloudQueueReady ? '上次的歌曲已缓存，点击播放即可继续' : '上次的歌曲已缓存，可先播放 · 正在同步音乐库…');
+  });
+}
+
+function rememberRecentPlayback(force=false) {
+  if(!currentTrack || !audio.currentSrc || recentAudioTrackKey!==trackKey(currentTrack))return;
+  if(!force && Date.now()-recentSaveAt<5000)return;
+  recentSaveAt=Date.now();
+  recentPlayback.remember(currentTrack,audio.currentTime,{force});
 }
 
 function bindEvents() {
@@ -345,6 +395,7 @@ function bindEvents() {
   document.addEventListener('error',event=>retryCover(event.target),true);
   document.addEventListener('load',event=>{const image=event.target;if(image.matches?.('img.queue-cover')){image.style.opacity='';delete image.dataset.coverFailed;}},true);
   window.addEventListener('online',()=>{
+    if(!cloudQueueReady)void restoreQueue();
     document.querySelectorAll('img[data-cover-failed]').forEach(image=>{image.dataset.coverRetries='0';retryCover(image);});
     if(currentTrack && !lyricLoading && !lyricCache.has(trackKey(currentTrack)))void loadCurrentLyrics();
   });
@@ -379,12 +430,23 @@ function bindEvents() {
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
   audio.addEventListener("timeupdate", updateProgress);
+  audio.addEventListener('timeupdate',()=>rememberRecentPlayback());
+  audio.addEventListener('pause',()=>rememberRecentPlayback(true));
+  window.addEventListener('pagehide',()=>rememberRecentPlayback(true));
   audio.addEventListener("loadedmetadata", () => {
     updateProgress();
     if (!audio.paused) maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
   });
   audio.addEventListener("playing", () => {
+    rememberRecentPlayback(true);
+    clearTimeout(recentCacheTimer);
+    if(!mobileClient){
+      const playingTrack=currentTrack;
+      recentCacheTimer=setTimeout(()=>{
+        if(currentTrack===playingTrack && !audio.paused)void recentPlayback.cacheTrack(playingTrack);
+      },2500);
+    }
     startSpectrumMeter();
     updateHostIntroDisplay();
     refreshPlayStateForCurrent();
@@ -395,6 +457,7 @@ function bindEvents() {
     if (!audio.paused && !audio.ended && (event.type === "waiting" || audio.readyState < 3)) setPlayState("[缓冲中]", false);
   });
   audio.addEventListener("play", () => {
+    rememberRecentPlayback(true);
     startSpectrumMeter();
     setPlayState(audio.readyState >= 3 ? "[播放中]" : "[缓冲中]", audio.readyState >= 3);
     playButton.setAttribute("aria-label", "暂停");
@@ -450,7 +513,7 @@ function bindEvents() {
 let playerEventsEnabled = true;
 let builtinBrainLabel = '[大脑: 本地规则]';
 async function loadConfig() {
-  const data = await getJson("/api/config");
+  const data = await getJson("/api/config",{signal:AbortSignal.timeout(10000)});
   playerEventsEnabled=data.playerEvents!==false;
   brainStatus.textContent =
     data.aiProvider === "local" ? "[大脑: 本地规则]" : `[大脑: ${data.aiModel}]`;
@@ -544,7 +607,7 @@ function normalizeClientIsoDate(value) {
 
 async function loadNeteaseAccount() {
   try {
-    const data = await getJson("/api/music/account");
+    const data = await getJson("/api/music/account",{signal:AbortSignal.timeout(10000)});
     if (!data.enabled) {
       neteaseAccount.textContent = "账号: 未配置网易云";
       return;
@@ -1019,11 +1082,14 @@ async function playTrack(index, { throwPlaybackErrors = false } = {}) {
   syncQueuePageToCurrent();
   renderCurrentTrack();
   renderQueue();
-  persistQueue();
+  if(cloudQueueReady)persistQueue();
 
   audio.loop = playMode === "single";
   sourceValue.textContent = `[来源: ${translateSource(currentTrack.provider || "netease")}]`;
-  audio.src = currentTrack.url;
+  // Keep play() inside the tap gesture; startup primes the cached Blob asynchronously.
+  const cached=recentPlayback.sourceFor(currentTrack);
+  audio.src = cached || currentTrack.url;
+  recentAudioTrackKey=trackKey(currentTrack);
   audio.currentTime = 0;
 
   try {
@@ -2017,6 +2083,7 @@ function clearHostIntroVoiceTimer() {
 function handleVisibilityChange() {
   if (document.hidden) trackWaveform.abort();
   if (!document.hidden) {
+    if(!cloudQueueReady)void restoreQueue();
     if(currentTrack && !lyricLoading && !lyricCache.has(trackKey(currentTrack)))void loadCurrentLyrics();
     if(!audio.paused)startSpectrumMeter();
     refreshPlayStateForCurrent();
@@ -3120,6 +3187,8 @@ function trackKey(track) {
 function persistQueue() {
   queueMutationVersion++;
   queueDirty = true;
+  saveQueueFallback();
+  if(!cloudQueueReady)return;
   clearTimeout(saveQueueTimer);
   saveQueueTimer = window.setTimeout(() => {
     void saveQueue();
@@ -3127,6 +3196,7 @@ function persistQueue() {
 }
 
 async function saveQueue() {
+  if(!cloudQueueReady)return;
   if (queueSavePromise) return queueSavePromise;
   queueSavePromise = (async () => {
     while (queueDirty && !queueConflict) {
@@ -3148,23 +3218,39 @@ async function saveQueue() {
 }
 
 async function restoreQueue() {
-  try {
-    const data = await getJson("/api/queue");
-    serverQueueRevision = data.revision || 0;
-    queue = Array.isArray(data.queue) ? data.queue.filter(isPlayable).map(normalizeClientTrack).slice(0, MAX_QUEUE) : [];
-    currentIndex = Number.isInteger(data.currentIndex) ? data.currentIndex : resolvePlayableIndex(queue);
-    if (currentIndex >= queue.length || currentIndex < -1) currentIndex = resolvePlayableIndex(queue);
-    currentTrack = currentIndex >= 0 ? queue[currentIndex] : null;
-  } catch {
-    const fallback = loadQueueFallback();
-    queue = fallback.queue;
-    currentIndex = fallback.currentIndex;
-    currentTrack = currentIndex >= 0 ? queue[currentIndex] : null;
-  }
+  if(queueRestoreJob)return queueRestoreJob;
+  queueRestoreJob=restoreCloudQueue().finally(()=>{queueRestoreJob=null;});
+  return queueRestoreJob;
+}
 
-  syncQueuePageToCurrent();
-  renderCurrentTrack();
-  renderQueue();
+async function restoreCloudQueue() {
+  const version=queueMutationVersion;
+  let synced=false;
+  try {
+    const data=await getJson('/api/queue',{signal:AbortSignal.timeout(15000)});
+    serverQueueRevision=data.revision || 0;cloudQueueReady=true;synced=true;
+    if(version!==queueMutationVersion || queueDirty){
+      queueConflict=true;document.querySelector('#queueConflictPanel').hidden=false;
+      startupMessage('音乐库已载入，本机修改待确认同步');return;
+    }
+    const localTrack=localPlaybackPreview ? currentTrack : null;
+    queue=Array.isArray(data.queue) ? data.queue.filter(isPlayable).map(normalizeClientTrack).slice(0,MAX_QUEUE) : [];
+    if(localTrack){
+      let index=queue.findIndex(track=>trackKey(track)===trackKey(localTrack));
+      if(index<0){queue=trimQueueKeepingCurrent([localTrack,...queue],trackKey(localTrack));index=queue.findIndex(track=>trackKey(track)===trackKey(localTrack));}
+      currentIndex=index;
+    }else currentIndex=Number.isInteger(data.currentIndex) ? data.currentIndex : resolvePlayableIndex(queue);
+    if(currentIndex>=queue.length || currentIndex<0)currentIndex=resolvePlayableIndex(queue);
+    currentTrack=currentIndex>=0 ? queue[currentIndex] : null;
+    saveQueueFallback();
+  }catch{
+    if(!currentTrack){
+      const fallback=loadQueueFallback();queue=fallback.queue;currentIndex=fallback.currentIndex;
+      currentTrack=currentIndex>=0 ? queue[currentIndex] : null;
+    }
+  }
+  syncQueuePageToCurrent();renderCurrentTrack();renderQueue();
+  startupMessage(synced ? (localPlaybackPreview ? '已恢复上次播放，音乐库已同步' : '') : currentTrack ? '暂时无法同步音乐库，可先播放本机保留的歌曲' : '音乐库连接较慢，返回前台后会重试');
 }
 
 function saveQueueFallback() {

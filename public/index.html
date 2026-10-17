@@ -1,15 +1,33 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="app-booting">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
+
+    <style>
+      html{background:#080808} .app-booting .app-shell{visibility:hidden}
+      .startup-skeleton{position:fixed;inset:0;z-index:9999;overflow:hidden;background:#080808;color:#aaa;padding:32px max(20px,calc((100vw - 1440px)/2));font:13px system-ui,sans-serif;box-sizing:border-box}
+      html:not(.app-booting) .startup-skeleton{display:none}
+      .startup-brand{font-size:20px;letter-spacing:5px;color:#ddd;margin:0 0 28px}.startup-caption{margin:0 0 22px;color:#888;letter-spacing:.5px}
+      .startup-layout{display:grid;grid-template-columns:1fr 1.35fr 1fr;gap:18px}.startup-card{padding:28px;border:1px solid #292929;border-radius:20px;background:#151515;min-height:460px}
+      .startup-line,.startup-disc,.startup-bar{display:block;background:#252525;animation:startup-breathe 1.6s ease-in-out infinite alternate}
+      .startup-line{height:12px;border-radius:4px;margin:18px 0;width:65%}.startup-line.short{width:36%}.startup-line.title{height:64px;width:55%;margin:44px 0 28px}
+      .startup-meter{display:flex;gap:5px;align-items:center;height:56px;margin:30px 0}.startup-bar{flex:1;height:20px;border-radius:3px}.startup-controls{display:flex;gap:22px;justify-content:center;margin-top:32px}.startup-disc{width:40px;height:40px;border-radius:50%}.startup-disc.main{width:52px;height:52px;margin-top:-6px}
+      .startup-row{display:flex;align-items:center;gap:14px;padding:17px 0;border-bottom:1px solid #252525}.startup-art{width:44px;height:44px;border-radius:8px;background:#252525;flex:none}.startup-row .startup-line{margin:0;width:60%;height:13px}
+      #startupStatus{font-size:11px;line-height:1.7;color:#999;min-height:19px;margin:10px 0 0;letter-spacing:0}#startupStatus[hidden]{display:block!important;visibility:hidden}.hero-block #trackInfo{min-height:1.6em}
+      @keyframes startup-breathe{to{opacity:.45}}
+      @media(max-width:860px){.startup-skeleton{padding:24px 18px}.startup-layout{grid-template-columns:1fr;gap:18px}.startup-workspace{display:none}.startup-card{padding:22px;min-height:280px}.startup-layout .startup-card:last-child{min-height:210px}.startup-line.title{height:56px;margin-top:26px}.startup-brand{margin-bottom:22px}}
+      @media(prefers-reduced-motion:reduce){.startup-line,.startup-disc,.startup-bar{animation:none}}
+    </style>
+    <script>setTimeout(function(){document.documentElement.classList.remove('app-booting')},8000)</script>
     <title>Awudio - AI 音乐播放器</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/fonts/google-fonts.css?v=36">
-    <link rel="stylesheet" href="/styles.css?v=43">
+    <link rel="stylesheet" href="/styles.css?v=45">
   </head>
   <body>
+    <div id="startupSkeleton" class="startup-skeleton" role="status" aria-live="polite"><p class="startup-brand">AWUDIO</p><p class="startup-caption">正在准备你的音乐…</p><div class="startup-layout" aria-hidden="true"><div class="startup-card startup-workspace"><span class="startup-line short"></span><span class="startup-line"></span><span class="startup-line short"></span></div><div class="startup-card"><span class="startup-line short"></span><span class="startup-line title"></span><span class="startup-line"></span><div class="startup-meter"><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i><i class="startup-bar"></i></div><div class="startup-controls"><span class="startup-disc"></span><span class="startup-disc main"></span><span class="startup-disc"></span></div></div><div class="startup-card"><span class="startup-line short"></span><div class="startup-row"><span class="startup-art"></span><span class="startup-line"></span></div><div class="startup-row"><span class="startup-art"></span><span class="startup-line"></span></div><div class="startup-row"><span class="startup-art"></span><span class="startup-line"></span></div><div class="startup-row"><span class="startup-art"></span><span class="startup-line"></span></div></div></div></div>
     <div class="app-shell">
       <header class="topbar">
         <div>
@@ -43,6 +61,7 @@
           <div class="hero-block">
             <h1 id="clockDisplay">00:00</h1>
             <p id="trackInfo">等待推荐或搜索</p>
+            <p id="startupStatus" class="startup-status" role="status" hidden></p>
           </div>
 
           <div class="meter-row">
@@ -223,7 +242,7 @@
         <section id="mobilePreferenceSettings" class="mobile-setting-section"></section>
         <section id="remoteAgentSection" hidden><button id="downloadBridge" type="button" hidden>下载连接文件</button></section>
         <section class="mobile-setting-section"><h3>资料备份</h3><button id="downloadBackup" class="workspace-action secondary" type="button">下载资料备份</button><p class="view-status">不包含音频和登录凭据</p></section>
-        <section class="mobile-setting-section"><h3>本机缓存</h3><button id="clearCache" class="workspace-action secondary" type="button">清除本机缓存</button><p class="view-status">封面和近期列表数据保存在此设备。清理不会退出网易云或删除云端资料。</p></section><p id="settingsStatus" class="view-status" role="status"></p><footer class="mobile-settings-footer"><span id="instanceMode"></span><button id="signout" class="text-action" type="button" hidden>退出登录</button></footer>
+        <section class="mobile-setting-section"><h3>本机缓存</h3><button id="clearCache" class="workspace-action secondary" type="button">清除本机缓存</button><p class="view-status">保留最近一首歌曲、封面和近期列表。清理会移除本机缓存，不会退出网易云或删除云端资料。</p></section><p id="settingsStatus" class="view-status" role="status"></p><footer class="mobile-settings-footer"><span id="instanceMode"></span><button id="signout" class="text-action" type="button" hidden>退出登录</button></footer>
       </div>
     </dialog>
     <dialog id="radioStudio" class="radio-studio" aria-labelledby="radioStudioTitle">
@@ -246,6 +265,6 @@
     </dialog>
     <div id="globalNotice" class="global-notice" role="status" aria-live="polite" hidden></div>
     <dialog id="narrationReader" class="narration-reader" aria-labelledby="narrationReaderTitle"><header><h2 id="narrationReaderTitle">电台解说</h2><button id="closeNarrationReader" class="text-action" type="button">完成</button></header><p id="narrationReaderText"></p></dialog>
-    <script src="/app.js?v=44" type="module"></script>
+    <script src="/app.js?v=46" type="module"></script>
   </body>
 </html>

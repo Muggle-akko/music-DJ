@@ -20,7 +20,7 @@ export function envelopeLevel(envelope, position, index, count, volume=1, muted=
   const value=bin>=0&&bin<envelope.bins.length?envelope.bins[bin]:0;
   return Math.round(6+Math.pow(Math.min(1,value/envelope.reference),0.75)*84*Math.max(0,Math.min(1,volume)));
 }
-export function createTrackWaveform({fetchAudio=fetch,decode,retryDelayMs=1500}={}) {
+export function createTrackWaveform({fetchAudio=fetch,decode,retryDelayMs=1500,onAudioLoaded}={}) {
   let source='',envelope=null,pending=null,controller,generation=0;
   const cache=new Map();
   const decodeAudio=decode || (async bytes=>{
@@ -39,8 +39,11 @@ export function createTrackWaveform({fetchAudio=fetch,decode,retryDelayMs=1500}=
     const version=generation;controller=new AbortController();
     const signal=AbortSignal.any([controller.signal,AbortSignal.timeout(90000)]);
     const current=()=>!signal.aborted && version===generation;
-    async function analyse(chunks,size,complete) {
+    async function analyse(chunks,size,complete,type) {
       const bytes=new Uint8Array(size);let at=0;for(const c of chunks){bytes.set(c,at);at+=c.length;}
+      if(complete && current()){
+        try{void Promise.resolve(onAudioLoaded?.(url,bytes,type)).catch(()=>{});}catch{}
+      }
       const buffer=await decodeAudio(bytes.buffer);
       if(!current())return;
       envelope=analyseEnvelope(buffer);
@@ -69,7 +72,7 @@ export function createTrackWaveform({fetchAudio=fetch,decode,retryDelayMs=1500}=
               nextPreview=Math.max(nextPreview*2,size*2);
             }
           }
-          if(current())await analyse(chunks,size,true);
+          if(current())await analyse(chunks,size,true,type);
           return;
         } catch {
           if(!current() || attempt===2)return;
