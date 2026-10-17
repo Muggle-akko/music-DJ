@@ -1,6 +1,6 @@
 import { createTrackWaveform } from "/waveform.mjs?v=38";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=42";
+import { createMobileWorkspace } from "/mobile.mjs?v=43";
 import { createMediaSession } from "/media-session.mjs?v=36";
 import { browserDataCache, apiFetch } from "/network.mjs?v=36";
 import { createListeningController } from "/listening.mjs?v=36";
@@ -261,7 +261,7 @@ async function init() {
 
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("/sw.js?v=42");
+      await navigator.serviceWorker.register("/sw.js?v=43");
     } catch {
       // PWA cache is optional.
     }
