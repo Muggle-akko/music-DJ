@@ -1,5 +1,5 @@
 import { mobileClient } from '/device-policy.mjs?v=36';
-import { createPlayerMorph } from '/player-morph.mjs?v=41';
+import { createPlayerMorph } from '/player-morph.mjs?v=42';
 export function createMobileWorkspace({getTrack,onLocate}={}) {
   const el=id=>document.getElementById(id);
   const request=document.querySelector('.request-panel'), queue=document.querySelector('.queue-panel');

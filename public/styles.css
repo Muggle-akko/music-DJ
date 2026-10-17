@@ -2398,7 +2398,7 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
 .compact-player .topbar { display:flex; flex-direction:row; align-items:center; justify-content:space-between; margin-bottom:16px; gap:12px; }
 .compact-player .topbar .label { display:none; }
 .compact-player .brand { font-size:23px; letter-spacing:1.6px; }
-.compact-player .grid { display:grid; grid-template-columns:minmax(0,1fr); grid-template-areas:"player" "deck"; gap:16px; }
+.compact-player .grid { display:grid; grid-template-columns:minmax(0,1fr); grid-template-areas:"player" "deck"; gap:20px; }
 .compact-player .player-panel { min-height:0; height:auto; padding:22px 18px 16px; border-radius:20px; backdrop-filter:none; -webkit-backdrop-filter:none; }
 .compact-player .player-panel .context-strip { display:flex; flex-wrap:wrap; gap:4px 10px; font-size:10px; line-height:1.6; }
 .compact-player .player-panel .panel-heading { justify-content:space-between; gap:10px; margin-bottom:0; }
@@ -2528,7 +2528,9 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
 .compact-player .locate-current { font-size:11px; min-height:44px; }
 .compact-player .mobile-flip { padding-inline:6px; gap:4px; }
 /* A complete card fits on screen; list edges can hand scrolling back to the page. */
-.compact-player .mobile-deck { display:flex; flex-direction:column; height:calc(100vh - 104px - env(safe-area-inset-top)); height:calc(100svh - 104px - env(safe-area-inset-top)); margin-bottom:0; scroll-margin-top:calc(88px + env(safe-area-inset-top)); }
+.compact-player { --player-top:calc(12px + env(safe-area-inset-top)); --deck-top:calc(var(--player-top) + 72px + 20px); --deck-bottom:max(24px,env(safe-area-inset-bottom)); }
+.compact-player .app-shell { padding-bottom:var(--deck-bottom); }
+.compact-player .mobile-deck { display:flex; flex-direction:column; height:calc(100vh - var(--deck-top) - var(--deck-bottom)); height:calc(100svh - var(--deck-top) - var(--deck-bottom)); margin-bottom:0; scroll-margin-top:var(--deck-top); }
 .compact-player .mobile-deck-stage { flex:1; height:auto; min-height:0; }
 .compact-player .mobile-deck-heading { flex:0 0 56px; }
 .mobile-deck-footer { flex:0 0 48px; display:flex; align-items:center; justify-content:space-between; padding:0 16px; border-top:1px solid #ffffff0d; }
@@ -2536,12 +2538,15 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
 .mobile-deck-footer #returnToPlayer { color:var(--accent); }
 .compact-player .deck-face .queue-list,.compact-player .deck-face .content-scroll,.compact-player .deck-face .agent-plans,.compact-player .deck-face .agent-empty { overscroll-behavior-y:auto; }
 .compact-player .player-panel { scroll-margin-top:12px; }
-.mobile-player-anchor { grid-area:player; min-width:0; padding-top:calc(8px + env(safe-area-inset-top)); box-sizing:border-box; }
-.mobile-player-anchor > .player-panel { margin-top:calc(-8px - env(safe-area-inset-top)); }
-.compact-player .player-panel.is-morphing { position:fixed; z-index:80; left:var(--morph-left); top:var(--morph-top); width:var(--morph-width); height:calc(var(--morph-height) + (68px - var(--morph-height)) * var(--morph-progress)); margin:0; padding:0; overflow:hidden; border-radius:calc(20px - 4px * var(--morph-progress)); background:rgba(27,29,27,.98); box-shadow:0 8px 28px #0004; }
+.mobile-player-anchor { grid-area:player; min-width:0; padding-top:var(--player-top); box-sizing:border-box; }
+.mobile-player-anchor > .player-panel { margin-top:calc(-1 * var(--player-top)); }
+.compact-player .player-panel.is-morphing { position:fixed; z-index:80; left:var(--morph-left); top:var(--morph-top); width:var(--morph-width); margin:0; padding:0; overflow:hidden; border-radius:20px; background:rgba(27,29,27,.98); box-shadow:0 8px 28px #0004; contain:layout paint style; }
+.compact-player .player-panel.is-morphing::before { inset:auto 1px auto; top:1px; height:var(--morph-height); }
+.compact-player .player-panel.is-morphing::after { display:none; }
 .is-morphing .hero-block,.is-morphing .controls { display:contents; }
-.compact-player .is-morphing [data-morph-part] { position:absolute; left:var(--morph-x); top:var(--morph-y); width:calc(var(--morph-w) + var(--morph-dw) * var(--morph-progress)); height:var(--morph-h); min-height:0; margin:0 !important; transform-origin:top left; transform:translate(calc(var(--morph-dx) * var(--morph-progress)),calc(var(--morph-dy) * var(--morph-progress))) scale(calc(1 + var(--morph-scale) * var(--morph-progress))); transition:none; will-change:transform,opacity; }
-.compact-player .is-morphing [data-morph-part=detail] { opacity:clamp(0,calc(1 - 2.8 * var(--morph-progress)),1); }
+.compact-player .is-morphing [data-morph-part] { position:absolute; left:var(--morph-x); top:var(--morph-y); width:var(--morph-w); height:var(--morph-h); min-height:0; margin:0 !important; transform-origin:top left; transition:none; }
+.compact-player .is-morphing [data-morph-part]:not([data-morph-part=detail]) { will-change:transform; }
+.compact-player .is-morphing #playButton { box-shadow:0 0 0 3px #ffffff0a; }
 .compact-player .is-morphing [data-morph-part=title] { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; text-align:left; align-content:center; font-size:14px; line-height:22px; }
 .compact-player .is-folded #trackInfo { cursor:pointer; color:var(--text-primary); }
 .compact-player .is-folded [data-morph-part=detail] { visibility:hidden; will-change:auto; }

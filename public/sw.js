@@ -1,4 +1,4 @@
-const CACHE_NAME = "awudio-workspace-v41";
+const CACHE_NAME = "awudio-workspace-v42";
 const COVER_CACHE_NAME = "awudio-covers-v1";
 const MAX_COVER_ENTRIES = 240;
 const STATIC_ASSETS = [
