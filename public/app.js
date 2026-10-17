@@ -1,6 +1,6 @@
 import { createTrackWaveform } from "/waveform.mjs?v=38";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=36";
+import { createMobileWorkspace } from "/mobile.mjs?v=41";
 import { createMediaSession } from "/media-session.mjs?v=36";
 import { browserDataCache, apiFetch } from "/network.mjs?v=36";
 import { createListeningController } from "/listening.mjs?v=36";
@@ -219,7 +219,7 @@ const queueViewScroll=new Map();
 init();
 
 async function init() {
-  mobileWorkspace=createMobileWorkspace({audio,getTrack:()=>currentTrack,renderCover,onPlay:()=>togglePlay(),onNext:()=>playNext(),onLocate:locateCurrentTrack});
+  mobileWorkspace=createMobileWorkspace({getTrack:()=>currentTrack,onLocate:locateCurrentTrack});
   voiceAudio.preload = "auto";
   renderSegments(0);
   resetHostCaptionDisplay();
@@ -261,7 +261,7 @@ async function init() {
 
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("/sw.js?v=36");
+      await navigator.serviceWorker.register("/sw.js?v=41");
     } catch {
       // PWA cache is optional.
     }
@@ -903,7 +903,7 @@ function refreshResultActions() {
     button.disabled = exists || button.dataset.blocked === "true";
     const label = exists ? "已在队列" : "加入队列";
     button.title = label; button.setAttribute("aria-label", label);
-    button.classList.toggle('is-added',exists);if(button.dataset.added!==String(exists)){button.innerHTML=icon(exists?'check':'plus');button.dataset.added=String(exists);}
+    button.classList.toggle('is-added',exists);if(button.dataset.added!==String(exists)){button.innerHTML=icon(exists?'check':'queue');button.dataset.added=String(exists);}
   });
   document.querySelectorAll('[data-track-key]').forEach(row=>{
     const current=Boolean(currentTrack && row.dataset.trackKey===trackKey(currentTrack));
@@ -2400,7 +2400,7 @@ function renderQueue() {
       </div>
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
       <div class="queue-actions">
-        ${queueView==='liked' ? `<button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!isPlayable(track)}" aria-label="加入队列">${icon('plus')}</button>` : isLiked ? icon("heart-fill", "liked-indicator") : ""}
+        ${queueView==='liked' ? `<button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!isPlayable(track)}" aria-label="加入队列">${icon('queue')}</button>` : isLiked ? icon("heart-fill", "liked-indicator") : ""}
         <button class="menu-button" type="button" data-action="menu" aria-label="更多操作" title="更多操作" aria-expanded="false">
           ${icon("dots-three")}
         </button>

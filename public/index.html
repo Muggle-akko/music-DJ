@@ -7,7 +7,7 @@
     <title>Awudio - AI 音乐播放器</title>
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/fonts/google-fonts.css?v=36">
-    <link rel="stylesheet" href="/styles.css?v=36">
+    <link rel="stylesheet" href="/styles.css?v=41">
   </head>
   <body>
     <div class="app-shell">
@@ -26,8 +26,9 @@
 
       <main class="grid">
         <section id="mobileDeck" class="mobile-deck" aria-label="音乐工作区" data-face="queue" hidden>
-          <header class="mobile-deck-heading"><h2 id="mobileDeckTitle">我的音乐</h2><button id="locateCurrent" class="text-action locate-current" type="button" hidden>定位当前歌曲</button><button id="mobileFlip" class="mobile-flip" type="button" aria-pressed="false" aria-label="翻到 Agent 推荐"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg><span id="mobileFlipLabel">发现音乐</span></button></header>
+          <header class="mobile-deck-heading"><h2 id="mobileDeckTitle">我的音乐</h2><button id="mobileFlip" class="mobile-flip" type="button" aria-pressed="false" aria-label="翻到 Agent 推荐"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#cards"></use></svg><span id="mobileFlipLabel">发现音乐</span></button></header>
           <div id="mobileDeckStage" class="mobile-deck-stage"></div>
+          <footer class="mobile-deck-footer"><button id="returnToPlayer" class="text-action" type="button"><span aria-hidden="true">↑</span> 返回播放器</button><button id="locateCurrent" class="text-action locate-current" type="button" hidden>定位当前歌曲</button></footer>
         </section>
         <section class="player-panel" aria-label="播放器">
           <div class="panel-heading">
@@ -244,11 +245,7 @@
       <div class="radio-studio-footer"><p id="radioStudioStatus" class="view-status" role="status"></p><button id="radioSave" type="button" class="workspace-action">保存为历史电台</button></div>
     </dialog>
     <div id="globalNotice" class="global-notice" role="status" aria-live="polite" hidden></div>
-    <aside id="miniPlayer" class="mini-player" aria-label="便捷播放控制" hidden>
-      <button id="miniTrack" class="mini-track" type="button" aria-label="返回播放器"><span id="miniCover" class="mini-cover"></span><span class="mini-track-copy"><strong id="miniTitle"></strong><span id="miniArtist"></span></span></button>
-      <button id="miniPlay" class="round-icon-button" type="button" aria-label="播放"></button><button id="miniNext" class="round-icon-button" type="button" aria-label="下一首"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#skip-forward"></use></svg></button>
-    </aside>
     <dialog id="narrationReader" class="narration-reader" aria-labelledby="narrationReaderTitle"><header><h2 id="narrationReaderTitle">电台解说</h2><button id="closeNarrationReader" class="text-action" type="button">完成</button></header><p id="narrationReaderText"></p></dialog>
-    <script src="/app.js?v=36" type="module"></script>
+    <script src="/app.js?v=41" type="module"></script>
   </body>
 </html>
