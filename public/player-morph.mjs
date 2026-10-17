@@ -5,12 +5,11 @@ export function createPlayerMorph(player) {
   const reduced=matchMedia('(prefers-reduced-motion: reduce)');
   const title=player.querySelector('#trackInfo');
   const parts=[
-    ['.panel-heading'],['#clockDisplay'],['#trackInfo','title'],['.meter-row'],
+    ['.panel-heading'],['#clockDisplay'],['#trackInfo','title'],['#startupStatus'],['.meter-row'],
     ['#prevButton'],['#playButton','play'],['#nextButton','next'],
     ['#likeButton'],['#modeButton'],['#hostIntro'],['#hostCaption'],
   ].map(([selector,kind='detail'])=>({node:player.querySelector(selector),kind,rendered:{}}));
   let enabled=false,frame=0,geometry=null,docked=false,folded=false,detailsHidden=false;
-  let settleTimer=0,snapFrame=0,touching=false,settledFolded=false;
   const clamp=value=>Math.max(0,Math.min(1,value));
   const px=value=>`${Math.round(value*100)/100}px`;
   const variable=(node,name,value)=>node.style.setProperty(`--morph-${name}`,value);
@@ -62,8 +61,7 @@ export function createPlayerMorph(player) {
     if(!enabled||!geometry)return;
     const rawProgress=clamp((scrollY-geometry.top+geometry.topInset)/Math.max(1,geometry.height-72));
     const progress=rawProgress>=.998?1:rawProgress;
-    if(progress===0){settledFolded=false;restore();return;}
-    if(progress>=.999)settledFolded=true;
+    if(progress===0){restore();return;}
     if(!docked){
       // A changing fixed-player height must not trigger an expanded-layout measurement.
       observer.unobserve(player);
@@ -91,53 +89,14 @@ export function createPlayerMorph(player) {
     }
     setFolded(progress>.98);
   }
-  function queueSettle(){
-    clearTimeout(settleTimer);
-    if(enabled&&!snapFrame&&!touching)settleTimer=setTimeout(settle,100);
-  }
-  function cancelSnap(){
-    clearTimeout(settleTimer);cancelAnimationFrame(snapFrame);snapFrame=0;
-  }
-  function snapTo(target){
-    cancelSnap();
-    const start=scrollY,max=Math.max(0,document.documentElement.scrollHeight-innerHeight);
-    const end=Math.max(0,Math.min(max,Math.ceil(target)));
-    if(reduced.matches||Math.abs(end-start)<1){window.scrollTo({top:end,behavior:'instant'});schedule();return;}
-    const started=performance.now();
-    function step(now){
-      const t=Math.min(1,(now-started)/180),ease=1-(1-t)**3;
-      window.scrollTo({top:start+(end-start)*ease,behavior:'instant'});
-      if(t<1)snapFrame=requestAnimationFrame(step);
-      else {snapFrame=0;schedule();}
-    }
-    snapFrame=requestAnimationFrame(step);
-  }
-  function settle(){
-    if(!enabled||!geometry||touching||snapFrame)return;
-    const progress=clamp((scrollY-geometry.top+geometry.topInset)/Math.max(1,geometry.height-72));
-    if(progress<=0||progress>=.999)return;
-    // Finish only after the gesture/inertia ends; a dead zone avoids toggling
-    // direction around the midpoint. The page and player finish together.
-    settledFolded=settledFolded?progress>.42:progress>=.58;
-    snapTo(settledFolded?geometry.top+geometry.height-72-geometry.topInset:0);
-  }
   function schedule(){
-    if(!enabled)return;
-    if(!frame)frame=requestAnimationFrame(paint);
-    if(!snapFrame)queueSettle();
+    if(enabled&&!frame)frame=requestAnimationFrame(paint);
   }
   function expand(){
-    if(enabled&&geometry){settledFolded=false;snapTo(0);}
+    if(enabled)window.scrollTo({top:0,behavior:reduced.matches?'instant':'smooth'});
   }
   const observer=new ResizeObserver(()=>{if(enabled&&!docked)measure();});
   window.addEventListener('scroll',schedule,{passive:true});
-  window.addEventListener('scrollend',settle,{passive:true});
-  window.addEventListener('touchstart',()=>{touching=true;cancelSnap();},{passive:true});
-  for(const event of ['touchend','touchcancel'])window.addEventListener(event,()=>{touching=false;queueSettle();},{passive:true});
-  window.addEventListener('wheel',cancelSnap,{passive:true});
-  window.addEventListener('pointerdown',cancelSnap,{passive:true});
-  for(const event of ['pointerup','pointercancel'])window.addEventListener(event,queueSettle,{passive:true});
-  window.addEventListener('keydown',event=>{if(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))cancelSnap();});
   // Safari resizes the viewport while its address bar moves. Only a width change
   // requires new player geometry; a height-only change must not reset the animation.
   window.addEventListener('resize',()=>{if(enabled&&innerWidth!==geometry?.width)measure();},{passive:true});
@@ -155,7 +114,7 @@ export function createPlayerMorph(player) {
       if(value===enabled)return;
       enabled=value;
       if(enabled){player.before(anchor);anchor.append(player);observer.observe(player);measure();}
-      else {cancelSnap();restore();observer.unobserve(player);anchor.before(player);anchor.remove();geometry=null;settledFolded=false;}
+      else {cancelAnimationFrame(frame);frame=0;restore();observer.unobserve(player);anchor.before(player);anchor.remove();geometry=null;}
     },
   };
 }

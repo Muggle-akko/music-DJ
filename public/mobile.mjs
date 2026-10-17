@@ -1,11 +1,15 @@
 import { mobileClient } from '/device-policy.mjs?v=36';
-import { createPlayerMorph } from '/player-morph.mjs?v=43';
+import { createPlayerMorph } from '/player-morph.mjs?v=47';
 export function createMobileWorkspace({getTrack,onLocate}={}) {
   const el=id=>document.getElementById(id);
   const request=document.querySelector('.request-panel'), queue=document.querySelector('.queue-panel');
   const requestSlot=document.createComment('desktop workspace'),queueSlot=document.createComment('desktop queue');
   request.before(requestSlot);queue.before(queueSlot);
   const deck=el('mobileDeck'),stage=el('mobileDeckStage'),sheet=el('mobileSettings');
+  const deckAnchor=document.createElement('div');deckAnchor.className='mobile-deck-anchor';
+  const topStop=document.createElement('div');
+  topStop.className='mobile-top-stop';topStop.setAttribute('aria-hidden','true');topStop.hidden=true;
+  document.body.prepend(topStop);
   const playerMorph=createPlayerMorph(document.querySelector('.player-panel'));
   const settingNodes=['agentConnectionSettings','radioSettings'].map(id=>{
     const node=el(id),slot=document.createComment(id);node.before(slot);return {node,slot};
@@ -72,14 +76,16 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
     const next=mobileClient || matchMedia('(max-width: 860px)').matches;
     if(next===compact)return;
     compact=next;document.body.classList.toggle('compact-player',compact);deck.hidden=!compact;
+    document.documentElement.classList.toggle('mobile-player-snap',compact);topStop.hidden=!compact;
     if(compact){
-      document.querySelector('.player-panel').after(deck);
+      document.querySelector('.player-panel').after(deckAnchor);deckAnchor.append(deck);
       ['AI 推荐','搜索','云歌单'].forEach((name,i)=>{tabNames[i].node.textContent=name;});
       stage.append(queue,request);queue.classList.add('deck-face','deck-front');request.classList.add('deck-face','deck-back');
       for(const {node} of settingNodes){node.removeAttribute('popover');node.hidden=false;el(node.id==='radioSettings'?'mobilePreferenceSettings':'mobilePlayerSettings').append(node);}
       showFace(face);
     }else{
       cancelFlip();
+      deckAnchor.before(deck);deckAnchor.remove();
       tabNames.forEach(({node,desktop})=>{node.textContent=desktop;});
       requestSlot.after(request);queueSlot.after(queue);request.classList.remove('deck-face','deck-back');queue.classList.remove('deck-face','deck-front');
       for(const {node,slot} of settingNodes){slot.after(node);node.hidden=node.id==='agentConnectionSettings';if(node.id==='radioSettings')node.setAttribute('popover','auto');}
@@ -92,7 +98,7 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   document.addEventListener('visibilitychange',()=>{if(document.hidden&&flipAnimation)showFace(targetFace);});
   el('mobileSettingsOpen').addEventListener('click',async()=>{
     sheet.showModal();
-    if(!settingsLoaded){settingsLoaded=true;try{await import('/settings.mjs?v=44');}catch{settingsLoaded=false;el('settingsStatus').textContent='设置加载失败，请重新打开';}}
+    if(!settingsLoaded){settingsLoaded=true;try{await import('/settings.mjs?v=46');}catch{settingsLoaded=false;el('settingsStatus').textContent='设置加载失败，请重新打开';}}
     else window.dispatchEvent(new Event('awudio:settings-open'));
   });
   el('mobileSettingsClose').addEventListener('click',()=>sheet.close());

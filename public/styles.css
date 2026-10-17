@@ -2524,9 +2524,13 @@ button:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 3
 .compact-player .locate-current { font-size:11px; min-height:44px; }
 .compact-player .mobile-flip { padding-inline:6px; gap:4px; }
 /* A complete card fits on screen; list edges can hand scrolling back to the page. */
+/* The browser owns inertia and settling. Do not rewrite scrollTop from JS. */
+html.mobile-player-snap { scroll-snap-type:y mandatory; }
+.mobile-top-stop { height:1px; margin-bottom:-1px; scroll-snap-align:start; scroll-snap-stop:always; }
 .compact-player { --player-top:calc(12px + env(safe-area-inset-top)); --deck-top:calc(var(--player-top) + 72px + 20px); --deck-bottom:max(24px,env(safe-area-inset-bottom)); }
 .compact-player .app-shell { padding-bottom:var(--deck-bottom); }
-.compact-player .mobile-deck { display:flex; flex-direction:column; height:calc(100vh - var(--deck-top) - var(--deck-bottom)); height:calc(100svh - var(--deck-top) - var(--deck-bottom)); margin-bottom:0; scroll-margin-top:var(--deck-top); }
+.mobile-deck-anchor { grid-area:deck; min-width:0; height:calc(100vh - var(--deck-top) - var(--deck-bottom)); height:calc(100svh - var(--deck-top) - var(--deck-bottom)); overflow:clip; scroll-margin-top:var(--deck-top); scroll-snap-align:start; scroll-snap-stop:always; }
+.compact-player .mobile-deck { display:flex; flex-direction:column; height:100%; margin-bottom:0; }
 .compact-player .mobile-deck-stage { flex:1; height:auto; min-height:0; }
 .compact-player .mobile-deck-heading { flex:0 0 56px; }
 .mobile-deck-footer { flex:0 0 48px; display:flex; align-items:center; justify-content:space-between; padding:0 16px; border-top:1px solid #ffffff0d; }
