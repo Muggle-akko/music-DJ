@@ -1,0 +1,6 @@
+{$AWUDIO_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy app:4173 {
+    flush_interval -1
+  }
+}

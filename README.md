@@ -1,3 +1,10 @@
+## 私人服务器版
+
+支持将播放器、电台库及网易云接入一起部署到个人服务器，Mac 仅作为可选的 Agent 创作入口。安装、登录、远程 MCP、数据迁移与备份步骤见 [个人服务器部署说明](md/server-deployment.md)。默认本地运行方式保留，官方网易云 CLI 暂未接入。
+
+如果使用 Vercel 的域名与托管环境，使用 [Vercel 部署说明](md/vercel-deployment.md)。已提供专用容器和 PostgreSQL 持久化，需连接自己的数据库并完成公网验证，不能只按静态项目上传。
+
+
 Awudio AI 音乐播放器 MVP
 极简风格的个人 AI 电台。第一版刻意保持小巧：
 public/ 目录下的静态 PWA 前端。

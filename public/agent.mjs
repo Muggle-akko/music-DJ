@@ -1,15 +1,23 @@
+import { syncDelay } from '/sync-policy.mjs?v=33';
+import { browserDataCache } from '/network.mjs?v=33';
+import { mobileClient } from "/device-policy.mjs?v=33";
+import { apiFetch } from "/network.mjs?v=33";
 // External Agent integration. The browser owns audio; the server owns durable plans and commands.
 export function createAgentController(adapter) {
   let token, playerId, mode = 'builtin', lastSnapshot, initializing, refreshing, repeat = false;
-  let streamAbort, stopped = false, lastLease = null, externalPlayback = false;
+  let streamAbort, stopped = false, lastLease = null;
   let heartbeatRunning = false, renderKey = '', manualVersion = 0;
   let modeChanging = false, deviceChoiceDirty = false;
-  let radioHistoryKey = '';
+  let radioHistoryKey = '', timer, failures=0,lastAttempt=0;
+  const delay=()=>syncDelay({agents:Boolean(lastSnapshot?.agents?.length),playing:!adapter.getPlayback().paused,hidden:document.hidden,pending:pendingReceipts.size>0,failures});
+  function schedule(){clearTimeout(timer);const ms=delay();if(!stopped && ms!==null)timer=setTimeout(()=>{void heartbeat();},ms);}
+  function wake(){clearTimeout(timer);void heartbeat();}
   const pendingReceipts = new Map();
   const seenKey = 'awudio.agent.commands.v1';
   let seen;
   try { seen = new Set(JSON.parse(sessionStorage.getItem(seenKey) || '[]')); } catch { seen = new Set(); }
   const node = id => document.getElementById(id);
+  const playbackOnly = () => mobileClient || matchMedia('(max-width: 860px)').matches;
   const status = message => {
     node('agentStatus').textContent = message;
     node('agentConnectionState').title = message;
@@ -20,36 +28,41 @@ export function createAgentController(adapter) {
     sessionStorage.setItem(seenKey, JSON.stringify([...seen]));
   };
   async function api(path, body) {
-    const response = await fetch(`/api/player/${path}`, { method: body === undefined ? 'GET' : 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Awudio-Browser': '1', ...(token ? { 'X-Awudio-Player-Token': token } : {}) },
+    const response = await apiFetch(`/api/player/${path}`, { method: body === undefined ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Awudio-Browser': '1', ...(token ? { 'X-Awudio-Player-Token': token } : {}),
+        ...(path==='snapshot' && lastSnapshot?.plansVersion ? {'X-Awudio-Plans-Version':lastSnapshot.plansVersion} : {}),
+        ...(path==='snapshot' && lastSnapshot?.feedbackVersion ? {'X-Awudio-Feedback-Version':lastSnapshot.feedbackVersion} : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(15000) });
     const result = await response.json();
     if (!response.ok) {
       if (response.status === 401) { token = null; streamAbort?.abort(); }
-      throw Object.assign(new Error(result.message || '播放器连接失败'), { status: result.status });
+      throw Object.assign(new Error(result.message || result.error || '播放器连接失败'), { status: result.status });
     }
+    if(result.plansUnchanged)result.plans=lastSnapshot.plans;
+    if(result.feedbackUnchanged)result.feedback=lastSnapshot.feedback;
     return result;
   }
   async function initialize() {
     if (token) return;
-    initializing ||= api('register', { name: `网页播放器 · ${document.title}` }).then(result => {
+    initializing ||= api('register', { name: localStorage.getItem('awudio.deviceName') || (/iPad/.test(navigator.userAgent) || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1 ? 'iPad' : /iPhone/.test(navigator.userAgent) ? 'iPhone' : /Mac/.test(navigator.platform) ? 'Mac 网页播放器' : '网页播放器') }).then(async result => {
       token = result.token; playerId = result.playerId;
-      void stream();
+      if(playbackOnly() && result.mode!=='external')await api('mode',{mode:'external'});
+      if(adapter.events!==false)void stream();
     }).finally(() => { initializing = null; });
     await initializing;
   }
   async function heartbeat() {
     if (heartbeatRunning || stopped) return;
-    heartbeatRunning = true;
+    heartbeatRunning = true;lastAttempt=Date.now();
     try {
       await initialize();
-      await api('heartbeat', { playback: adapter.getPlayback() });
+      await api('heartbeat', { playback: adapter.getPlayback(), heartbeatMs:delay(), name:localStorage.getItem('awudio.deviceName') || undefined });
       for (const [id, receipt] of pendingReceipts) {
         await api('receipt', receipt); pendingReceipts.delete(id);
       }
-      await refresh();
-    } catch (error) { status(error.message); node('agentConnectionState').dataset.state = 'error'; }
-    finally { heartbeatRunning = false; }
+      if(await refresh())failures=0;else failures++;
+    } catch (error) { failures++;status(error.message); node('agentConnectionState').dataset.state = 'error'; }
+    finally { heartbeatRunning = false;schedule(); }
   }
   async function sendReceipt(command, state, extra = {}) {
     const receipt = { operationId: command.id, generation: command.generation, status: state, ...extra };
@@ -72,7 +85,6 @@ export function createAgentController(adapter) {
       if (manualVersion !== version || mode !== 'external' || lastLease !== command.generation) {
         await sendReceipt(command, 'uncertain', { message: '执行期间用户操作或控制设备已改变，请查看实际状态' }); return;
       }
-      externalPlayback = outcome === 'playing';
       await api('heartbeat', { playback: adapter.getPlayback() });
       await sendReceipt(command, 'applied', { outcome });
     } catch (error) {
@@ -86,24 +98,22 @@ export function createAgentController(adapter) {
     const nextMode = snapshot.mode;
     if (mode !== nextMode) manualVersion++;
     mode = nextMode;
-    const wasLease = lastLease;
     lastLease = snapshot.lease?.playerId === playerId ? snapshot.lease.generation : null;
-    if (wasLease && !lastLease && externalPlayback && mode === 'external') { adapter.pause(); externalPlayback = false; }
     adapter.onMode(mode);
     for (const button of document.querySelectorAll('[data-radio-mode]')) {
       button.setAttribute('aria-pressed', String(button.dataset.radioMode === mode));
       button.disabled = modeChanging;
     }
-    node('externalAgentPanel').hidden = mode !== 'external';
-    node('builtinRecommendation').hidden = mode === 'external';
+    node('externalAgentPanel').hidden = !playbackOnly() && mode !== 'external';
+    node('builtinRecommendation').hidden = playbackOnly() || mode === 'external';
     const active = snapshot.agents || [];
     const selected = snapshot.players.find(p => p.selected);
     status(active.length ? `${active.map(a => a.name).join('、')} 已连接` : '尚未连接 Agent');
     node('agentConnectionState').dataset.state = active.length ? 'ready' : 'waiting';
     const select = node('agentPlayerSelect'), previous = select.value;
     const onlinePlayers = snapshot.players.filter(p => p.online);
-    const playerName = p => p.playerId === playerId ? '本页面' : `页面 ${onlinePlayers.findIndex(item => item.playerId === p.playerId) + 1}`;
-    const playerKey = JSON.stringify(onlinePlayers.map(p => p.playerId));
+    const playerName = p => p.playerId === playerId ? `${p.name}（本页面）` : p.name;
+    const playerKey = JSON.stringify(onlinePlayers.map(p => [p.playerId,p.name]));
     if (select.dataset.players !== playerKey) {
       select.replaceChildren();
       for (const player of onlinePlayers) {
@@ -130,7 +140,7 @@ export function createAgentController(adapter) {
     node('agentEmptyState').hidden = !empty; node('agentPlans').hidden = empty;
     node('agentEmptyTitle').textContent = active.length ? '等待你的下一段音乐' : '连接你的音乐助手';
     node('agentEmptyDescription').textContent = active.length ? '告诉 Agent 想听什么，选好的歌会出现在这里。' : '在 Codex 里聊想听的音乐，选好的歌会同步到这里。';
-    const key = JSON.stringify(snapshot.plans.map(p => [p.id, p.expiresAt, Date.parse(p.expiresAt) < Date.now()]));
+    const key = JSON.stringify(snapshot.plans.map(p => [p.id, p.createdAt]));
     if (renderKey !== key) { renderKey = key; adapter.renderPlans(snapshot.plans, applyPlan); }
   }
   async function refresh() {
@@ -144,6 +154,7 @@ export function createAgentController(adapter) {
         const version = manualVersion;
         const snapshot = await api('snapshot'); lastSnapshot = snapshot;
         render(snapshot);
+        if(!snapshot.plansUnchanged)void browserDataCache.write('/__awudio_cache/agent-plans',snapshot.plans,3*86400000);
         adapter.syncFeedback(snapshot.feedback || []);
         if (!clean || before.queueMutationVersion !== adapter.getPlayback().queueMutationVersion) continue;
         await adapter.syncQueue(snapshot);
@@ -152,14 +163,15 @@ export function createAgentController(adapter) {
           else await execute(command, snapshot, before);
         }
       } while (repeat && !stopped);
-    })().catch(error => { status(error.message); node('agentConnectionState').dataset.state = 'error'; }).finally(() => { refreshing = null; });
+      return true;
+    })().catch(error => { status(error.message); node('agentConnectionState').dataset.state = 'error';return false; }).finally(() => { refreshing = null; });
     return refreshing;
   }
   async function stream() {
     streamAbort?.abort();
     const controller = new AbortController(); streamAbort = controller;
     try {
-      const response = await fetch('/api/player/events', { headers: { 'X-Awudio-Browser': '1', 'X-Awudio-Player-Token': token }, signal: controller.signal });
+      const response = await apiFetch('/api/player/events', { headers: { 'X-Awudio-Browser': '1', 'X-Awudio-Player-Token': token }, signal: controller.signal });
       if (!response.ok || !response.body) throw new Error('stream_unavailable');
       const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = '';
       while (!stopped) {
@@ -181,7 +193,7 @@ export function createAgentController(adapter) {
       const snapshot = await api('snapshot');
       const target = snapshot.lease?.playerId;
       if (!target) throw new Error('请先选择接收播放的页面');
-      await api('apply', { operationId: crypto.randomUUID(), planId, expectedRevision: snapshot.revision, queueMode, playback, targetPlayerId: target });
+      await api('apply', { operationId: crypto.randomUUID(), planId, expectedRevision: snapshot.players.find(p=>p.playerId===target)?.playback?.queueRevision ?? snapshot.revision, queueMode, playback, targetPlayerId: target });
       await refresh();
     } catch (error) { adapter.notice(error.message); }
   }
@@ -207,7 +219,25 @@ export function createAgentController(adapter) {
     try { await api('select', { playerId: node('agentPlayerSelect').value }); deviceChoiceDirty = false; await refresh(); }
     catch (error) { adapter.notice(error.message); }
   });
-  node('agentRefreshButton').addEventListener('click', () => { void heartbeat(); });
+  async function refreshConnectionStatus() {
+    const buttons = ['agentRefreshButton', 'agentStatusRefreshButton'].map(node);
+    if (buttons.some(button => button.disabled)) return;
+    buttons.forEach(button => { button.disabled = true; button.setAttribute('aria-busy', 'true'); });
+    status('正在检查 Agent 连接…');
+    try {
+      await initialize();
+      const snapshot = await api('snapshot');
+      lastSnapshot = snapshot;failures=0;
+      render(snapshot);
+    } catch (error) {
+      status(error.message);
+      node('agentConnectionState').dataset.state = 'error';
+    } finally {
+      buttons.forEach(button => { button.disabled = false; button.removeAttribute('aria-busy'); });schedule();
+    }
+  }
+  node('agentRefreshButton').addEventListener('click', refreshConnectionStatus);
+  node('agentStatusRefreshButton').addEventListener('click', refreshConnectionStatus);
   node('agentExampleButton').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText('推荐几首英国乐队 Bôa 的歌，先展示，不要播放。'); adapter.notice('已复制，到 Agent 对话中粘贴即可'); }
     catch { adapter.notice('可以直接告诉 Agent：推荐几首英国乐队 Bôa 的歌'); }
@@ -217,9 +247,16 @@ export function createAgentController(adapter) {
     catch { adapter.notice('播放未开始，请检查音源后重试'); }
   });
   for (const event of ['pointerdown', 'keydown']) document.addEventListener(event, () => { manualVersion++; }, { capture: true });
-  const timer = setInterval(() => { void heartbeat(); }, 5000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)wake();else schedule();});
+  window.addEventListener('online',wake);
+  document.addEventListener('pointerdown',()=>{if(Date.now()-lastAttempt>15000)wake();},{passive:true});
+  void browserDataCache.read('/__awudio_cache/agent-plans').then(async cached=>{
+    if(!cached || lastSnapshot)return;
+    const plans=(await cached.json()).filter(plan=>Date.now()-Date.parse(plan.createdAt)<=3*86400000);
+    if(plans.length && !lastSnapshot){node('agentEmptyState').hidden=true;node('agentPlans').hidden=false;adapter.renderPlans(plans,applyPlan);status('上次推荐 · 正在检查连接…');}
+  }).catch(()=>{});
   void heartbeat();
-  window.addEventListener('pagehide', () => { stopped = true; clearInterval(timer); streamAbort?.abort(); });
+  window.addEventListener('pagehide', () => { stopped = true; clearTimeout(timer); streamAbort?.abort(); });
   window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
   return { refresh, get mode() { return mode; }, get playerId() { return playerId; }, get snapshot() { return lastSnapshot; } };
 }

@@ -1,0 +1,22 @@
+.instance-page { background:#161716; min-height:100dvh; }
+.signin-shell { width:min(420px,calc(100% - 48px)); margin:0 auto; padding:clamp(64px,16vh,160px) 0 48px; }
+.instance-page h1 { font-size:clamp(30px,6vw,42px); letter-spacing:-1px; font-weight:500; margin:44px 0 16px; }
+.instance-description { font-size:14px; line-height:1.9; color:#aaa; margin:12px 0 24px; }
+.instance-page input,.instance-page textarea { width:100%; box-sizing:border-box; background:#ffffff05; color:#eee; border:1px solid #ffffff25; border-radius:8px; padding:12px 14px; font:inherit; line-height:1.6; }
+.instance-page input:focus-visible,.instance-page textarea:focus-visible { outline:2px solid #b8c9b7; outline-offset:3px; }
+.signin-shell form { margin-top:34px; }.signin-shell .workspace-action { width:100%; min-height:44px; }
+.instance-footnote { font-size:12px; color:#858985; line-height:1.85; margin:16px 0 0; }
+.instance-status { min-height:24px; line-height:1.8; font-size:13px; color:#b8c9b7; margin:18px 0; overflow-wrap:anywhere; }
+.settings-shell { width:min(680px,calc(100% - 48px)); margin:auto; padding:40px 0 max(40px,env(safe-area-inset-bottom)); }
+.settings-header,.settings-section-title,.settings-footer { display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.settings-header a { color:#aaa; text-decoration:none; white-space:nowrap; font-size:12px; }
+.settings-section { padding:28px 0; border-top:1px solid #ffffff16; }
+.settings-section h2 { font-size:18px; font-weight:500; margin:0 0 12px; }
+.instance-badge { border:1px solid #b8c9b733; border-radius:99px; color:#b8c9b7; font-size:11px; padding:5px 10px; white-space:nowrap; }
+.instance-page summary { cursor:pointer; color:#aaa; font-size:12px; line-height:1.8; }
+.cookie-details { margin-top:22px; }.cookie-details form { margin-top:18px; }
+#qrPanel { margin:22px 0 0; }#qrImage { padding:10px; border-radius:10px; background:white; }
+.instance-page pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#b8c9b7; font-size:12px; line-height:1.8; }
+.settings-footer { border-top:1px solid #ffffff16; padding-top:24px; color:#858985; font-size:12px; }
+.instance-page button { min-height:40px; }.instance-page [hidden] { display:none!important; }
+@media(max-width:520px) { .settings-shell { padding-top:24px; }.settings-header .brand { font-size:36px; }.settings-section { padding:24px 0; } }

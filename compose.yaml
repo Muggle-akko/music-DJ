@@ -1,0 +1,60 @@
+name: awudio
+services:
+  app:
+    build:
+      context: .
+      target: app
+    env_file: ${AWUDIO_ENV_FILE:-.env.server}
+    environment:
+      AWUDIO_MODE: server
+      AWUDIO_DATA_DIR: /app/data
+      PORT: "4173"
+      HOST: 0.0.0.0
+      NCM_API_BASE: http://netease:3000
+    volumes:
+      - awudio_data:/app/data
+    restart: unless-stopped
+    init: true
+    depends_on:
+      netease:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    networks: [backend]
+  netease:
+    build:
+      context: .
+      target: netease
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    networks: [backend]
+  web:
+    image: caddy:2.10.2-alpine
+    environment:
+      AWUDIO_DOMAIN: ${AWUDIO_DOMAIN:?Run setup-server first}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on: [app]
+    networks: [backend]
+networks:
+  backend:
+volumes:
+  awudio_data:
+  caddy_data:
+  caddy_config:

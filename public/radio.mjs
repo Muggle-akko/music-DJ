@@ -1,3 +1,5 @@
+import { mobileClient } from "/device-policy.mjs?v=33";
+import { apiFetch } from "/network.mjs?v=33";
 export function createRadioStudio({ flushQueue, getRevision, notice, onSaved }) {
   const el = id => document.getElementById(id);
   const dialog = el('radioStudio');
@@ -10,7 +12,7 @@ export function createRadioStudio({ flushQueue, getRevision, notice, onSaved }) 
     draft=result.draft;dirty=false;preferencesDirty=false;
   }
   async function request(tool, args) {
-    const response = await fetch('/api/radios/studio', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool,args}),signal:AbortSignal.timeout(100000)});
+    const response = await apiFetch('/api/radios/studio', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool,args}),signal:AbortSignal.timeout(100000)});
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || '电台操作未完成');
     return data;
@@ -79,6 +81,7 @@ export function createRadioStudio({ flushQueue, getRevision, notice, onSaved }) 
     capabilities=data.capabilities;draft=data.draft;render();
   }
   async function open(source='queue',sourceId) {
+    if(mobileClient){notice('请在电脑上制作电台');return;}
     if(busy)return;
     if(!dialog.open)dialog.showModal();
     message('正在准备电台草稿…');
@@ -93,6 +96,7 @@ export function createRadioStudio({ flushQueue, getRevision, notice, onSaved }) 
     });
   }
   async function openDraft(id) {
+    if(mobileClient){notice('请在电脑上制作电台');return;}
     if(busy)return;if(!dialog.open)dialog.showModal();
     await run(async()=>{const data=await request('awudio_get_radio',{draftId:id});capabilities=data.capabilities;draft=data.draft;render();message('已恢复制作草稿。');});
   }

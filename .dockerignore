@@ -1,0 +1,13 @@
+.git
+.agents
+skills-lock.json
+.vercel
+**/node_modules
+**/.env
+**/.env.*
+data
+backups
+*.log
+*.err
+.DS_Store
+**/anonymous_token

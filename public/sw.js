@@ -1,12 +1,18 @@
-const CACHE_NAME = "awudio-workspace-v26";
+const CACHE_NAME = "awudio-workspace-v33";
 const STATIC_ASSETS = [
-  "/",
-  "/index.html",
   "/styles.css",
   "/app.js",
+  "/device-policy.mjs",
+  "/mobile.mjs",
+  "/waveform.mjs",
+  "/settings.mjs",
   "/listening.mjs",
   "/agent.mjs",
   "/radio.mjs",
+  "/network.mjs",
+  "/data-cache.mjs",
+  "/sync-policy.mjs",
+  "/media-session.mjs",
   "/assets/phosphor.svg",
   "/manifest.webmanifest",
   "/fonts/google-fonts.css",
@@ -31,7 +37,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
+      Promise.all(keys.filter((key) => key.startsWith("awudio-workspace-") && key !== CACHE_NAME).map((key) => caches.delete(key))),
     ),
   );
   self.clients.claim();
@@ -40,13 +46,15 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  if (url.pathname.startsWith("/api/")) return;
+  if (url.origin !== self.location.origin || event.request.method !== "GET" || !STATIC_ASSETS.includes(url.pathname)) return;
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        if (response.ok && !response.redirected && !response.headers.get("Cache-Control")?.includes("no-store")) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
         return response;
       })
       .catch(() => caches.match(event.request)),

@@ -1,0 +1,45 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import pg from 'pg';
+import {randomUUID} from 'node:crypto';
+import {mkdtemp} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {configureDataStore,readFile,writeFile,copyFile,appendFile,rename,unlink,fileVersion,withDataTransaction} from '../lib/data-store.mjs';
+import {atomicJson} from '../lib/storage.mjs';
+test('version cache observes other instances and rollbacks, with atomic in-database backups', {skip:!process.env.AWUDIO_TEST_DATABASE_URL}, async()=>{
+ const name='awudio_cache_'+randomUUID().replaceAll('-',''),admin=new pg.Pool({connectionString:process.env.AWUDIO_TEST_DATABASE_URL});
+ await admin.query(`CREATE DATABASE "${name}"`);
+ const url=new URL(process.env.AWUDIO_TEST_DATABASE_URL);url.pathname='/'+name;
+ const other=new pg.Pool({connectionString:url.href});
+ const root=await mkdtemp(join(tmpdir(),'awudio-cache-')),file=join(root,'value.json');
+ try {
+  await configureDataStore({url:url.href,root});
+  await atomicJson(file,{a:1});
+  const version=await fileVersion(file);
+  await atomicJson(file,{a:1});assert.equal(await fileVersion(file),version,'identical writes do not create new row versions');
+  const mutable=await readFile(file);mutable.fill(0);assert.deepEqual(JSON.parse(await readFile(file,'utf8')),{a:1});
+  await other.query('UPDATE awudio_objects SET body=$1 WHERE path=$2',[Buffer.from('{"a":2}'),'value.json']);
+  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),{a:2},'external writes invalidate cached bytes');
+  await assert.rejects(withDataTransaction('rollback',async()=>{await atomicJson(file,{a:3},true);assert.equal(JSON.parse(await readFile(file,'utf8')).a,3);throw new Error('rollback');}),/rollback/);
+  assert.equal(JSON.parse(await readFile(file,'utf8')).a,2,'uncommitted cache is never returned after rollback');
+  await assert.rejects(readFile(file+'.backup'),{code:'ENOENT'});
+  await atomicJson(file,{a:4},true);assert.equal(JSON.parse(await readFile(file+'.backup','utf8')).a,2);
+  await copyFile(file,join(root,'copy'));await appendFile(join(root,'copy'),'\n');await rename(join(root,'copy'),join(root,'moved'));
+  assert.equal(JSON.parse(await readFile(join(root,'moved'),'utf8')).a,4);
+  await assert.rejects(readFile(join(root,'copy')),{code:'ENOENT'});
+  const big=join(root,'large.json'),payload=JSON.stringify({tracks:Array.from({length:1378},(_,i)=>({id:i,title:'A real repeated metadata pattern',artist:'Fixture'}))});
+  await writeFile(big,payload);
+  const storedRow=(await other.query('SELECT body,body_compressed FROM awudio_objects WHERE path=$1',['large.json'])).rows[0];
+  assert.equal(storedRow.body.toString(),payload,'older deployments can still read the original body');
+  const stored=storedRow.body_compressed;
+  assert.ok(stored.length<payload.length/3,'large JSON is compressed in storage');
+  assert.equal(await readFile(big,'utf8'),payload);
+  await copyFile(big,join(root,'compressed-copy'));await appendFile(join(root,'compressed-copy'),'\n');
+  assert.equal(await readFile(join(root,'compressed-copy'),'utf8'),payload+'\n');
+  await other.query('UPDATE awudio_objects SET body=$1 WHERE path=$2',[Buffer.from('{"legacy":true}'),'large.json']);
+  assert.equal(await readFile(big,'utf8'),'{"legacy":true}','legacy writer invalidates the old compressed sidecar');
+  await unlink(file);await assert.rejects(readFile(file),{code:'ENOENT'});
+  await writeFile(file,'fresh');assert.equal(await readFile(file,'utf8'),'fresh');
+ }finally{await other.end();await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);await admin.end();}
+});

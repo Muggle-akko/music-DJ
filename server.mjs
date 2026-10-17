@@ -1,5 +1,6 @@
+import { mobileRequest } from "./public/device-policy.mjs";
 import { createServer } from "node:http";
-import { copyFile, readFile, rename, writeFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -14,6 +15,13 @@ import { recommend } from "./lib/recommendation/orchestrator.mjs";
 import { atomicJson, readJson } from "./lib/storage.mjs";
 import { createAgentService } from "./lib/agent/service.mjs";
 import { createRadioService, radioTracks } from "./lib/radio.mjs";
+import { configureDataStore, dataStoreEnabled, exists as dataExists, readFile as readDataFile,
+  writeFile as writeDataFile, mkdir as makeDataDir, rename as renameDataFile, copyFile as copyDataFile } from "./lib/data-store.mjs";
+import { cloudRequest } from "./lib/cloud-request.mjs";
+import { createDeviceState } from "./lib/device-state.mjs";
+import { createAccess } from "./lib/access.mjs";
+import { buildOwnerBackup } from './lib/backup.mjs';
+import { createInstanceRoutes } from "./lib/instance.mjs";
 
 const ROOT = resolve(".");
 loadEnvFile(resolve(ROOT, ".env"));
@@ -21,6 +29,8 @@ loadEnvFile(resolve(ROOT, ".env"));
 const PORT = Number(process.env.PORT || 4173);
 const PUBLIC_DIR = resolve(ROOT, "public");
 const DATA_DIR = process.env.AWUDIO_DATA_DIR ? resolve(process.env.AWUDIO_DATA_DIR) : resolve(ROOT, "data");
+await configureDataStore({url:process.env.AWUDIO_DATABASE_URL,root:DATA_DIR});
+if(process.env.AWUDIO_DEPLOYMENT==='vercel' && !dataStoreEnabled())throw new Error('Vercel deployment requires AWUDIO_DATABASE_URL');
 let STATE_FILE = resolve(DATA_DIR, "state.json");
 let STATE_BACKUP_FILE = resolve(DATA_DIR, "state.backup.json");
 const LISTENING_PROFILE_FILE = resolve(DATA_DIR, "listening-profile.json");
@@ -35,7 +45,11 @@ const DEEPSEEK_BASE_URL = trimTrailingSlash(process.env.DEEPSEEK_BASE_URL || "ht
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 const AI_PROVIDER = resolveAiProvider();
 const NCM_API_BASE = trimTrailingSlash(process.env.NCM_API_BASE || "");
-const NCM_COOKIE = process.env.NCM_COOKIE || "";
+const connectionFile = resolve(DATA_DIR, 'netease-connection.json');
+const savedConnection = await readJson(connectionFile, {});
+let NCM_COOKIE = savedConnection.cookie || process.env.NCM_COOKIE || "";
+const access = await createAccess({ dataDir:DATA_DIR, port:PORT, mode:process.env.AWUDIO_MODE || 'local',
+  publicUrl:process.env.AWUDIO_PUBLIC_URL || '', password:process.env.AWUDIO_PASSWORD || '' });
 const FISH_AUDIO_API_KEY = process.env.FISH_AUDIO_API_KEY || process.env.FISH_API_KEY || "";
 const FISH_AUDIO_TTS_URL = process.env.FISH_AUDIO_TTS_URL || "https://api.fish.audio/v1/tts";
 const FISH_AUDIO_MODEL = process.env.FISH_AUDIO_MODEL || "s2-pro";
@@ -43,6 +57,7 @@ const FISH_AUDIO_REFERENCE_ID = process.env.FISH_AUDIO_REFERENCE_ID || process.e
 const FISH_AUDIO_LATENCY = process.env.FISH_AUDIO_LATENCY || "normal";
 const FISH_AUDIO_SPEED = clampFloat(process.env.FISH_AUDIO_SPEED, 1, 0.75, 1.25);
 const TTS_PROVIDER = resolveTtsProvider();
+const deviceState = createDeviceState(access.remote);
 const NCM_SEARCH_PROBE_LIMIT = 12;
 
 
@@ -58,25 +73,33 @@ const PLAYLIST_RECOMMENDATION_LIMIT = 30;
 const HOST_INTRO_MAX_START_AT_MS = MAX_RECOMMENDATION_DURATION_MS - 15000;
 
 const RECOMMENDER_VERSION = "v2";
-const ncmV2 = createNcmClient({ baseUrl: NCM_API_BASE, cookie: NCM_COOKIE });
+const ncmV2 = createNcmClient({ baseUrl: NCM_API_BASE, cookie: () => NCM_COOKIE });
 const profileSync = createProfileSync({ dataDir: DATA_DIR, ncm: ncmV2 });
 const listeningEvents = createEventStore({ dataDir: DATA_DIR });
 const playabilityV2 = createPlayability({ ncm: ncmV2 });
 const traceStore = createTraceStore(DATA_DIR);
 const recommendationModel = createModel({ provider: AI_PROVIDER, deepseekKey: DEEPSEEK_API_KEY, deepseekBase: DEEPSEEK_BASE_URL, deepseekModel: DEEPSEEK_MODEL, openaiKey: OPENAI_API_KEY, openaiModel: OPENAI_MODEL });
 const activeRecommendations = new Map();
-let identityCache = null;
+let identityCache = null, identityRefresh = null, startupIdentity;
 let firstSyncAttempted = false;
 
 async function getV2Identity(required = false) {
   if (identityCache && identityCache.expiresAt > Date.now()) return identityCache;
-  try {
+  identityRefresh ||= (async () => {
     const identity = await profileSync.identity();
-    identityCache = { ...identity, authenticated: true, expiresAt: Date.now() + 60000 };
-    return identityCache;
-  } catch (error) {
+    if (savedConnection.accountKey && savedConnection.accountKey !== identity.accountKey) throw new Error('网易云账号与实例绑定不一致，请检查连接设置');
+    // Recover automatically if the adapter/network was unavailable during startup.
+    if (startupIdentity && !startupIdentity.authenticated) {
+      await stateWriteQueue;
+      await selectAccountState({ ...identity, authenticated:true });
+      startupIdentity = { ...identity, authenticated:true };
+    }
+    return identityCache = { ...identity, authenticated:true, expiresAt:Date.now()+60000 };
+  })().finally(() => { identityRefresh = null; });
+  try { return await identityRefresh; }
+  catch (error) {
     if (required) throw error;
-    return { authenticated: false, accountKey: accountKey(createHash('sha256').update(NCM_COOKIE || 'anonymous').digest('hex')) };
+    return { authenticated:false, accountKey:accountKey(createHash('sha256').update(NCM_COOKIE || 'anonymous').digest('hex')) };
   }
 }
 
@@ -162,26 +185,53 @@ const DEMO_TRACKS = [
   },
 ];
 
-await mkdir(DATA_DIR, { recursive: true });
-await mkdir(TTS_CACHE_DIR, { recursive: true });
+await makeDataDir(DATA_DIR, { recursive: true });
+await makeDataDir(TTS_CACHE_DIR, { recursive: true });
 
 // Select account-specific application state before accepting requests. The first
 // account adopts the legacy state; later accounts start isolated without deleting it.
-const startupIdentity = await getV2Identity();
-if (startupIdentity.authenticated) {
+startupIdentity = await getV2Identity();
+async function selectAccountState(identity) {
+  if (!identity.authenticated) return;
   const legacyFile = resolve(DATA_DIR, 'state.json');
-  const accountDir = resolve(DATA_DIR, 'accounts', startupIdentity.accountKey);
-  await mkdir(accountDir, { recursive: true });
-  const legacy = await readJson(legacyFile);
+  const accountDir = resolve(DATA_DIR, 'accounts', identity.accountKey);
+  await makeDataDir(accountDir, { recursive: true });
   const target = resolve(accountDir, 'state.json');
+  if(await dataExists(target)){
+    STATE_FILE=target;STATE_BACKUP_FILE=resolve(accountDir,'state.backup.json');return;
+  }
+  const legacy = await readJson(legacyFile);
   if (legacy && !legacy.ownerAccountKey) {
-    legacy.ownerAccountKey = startupIdentity.accountKey;
+    legacy.ownerAccountKey = identity.accountKey;
     await atomicJson(legacyFile, legacy, true);
   }
-  if (!existsSync(target) && legacy?.ownerAccountKey === startupIdentity.accountKey) await atomicJson(target, legacy);
+  if (!await dataExists(target) && legacy?.ownerAccountKey === identity.accountKey) await atomicJson(target, legacy);
   STATE_FILE = target;
   STATE_BACKUP_FILE = resolve(accountDir, 'state.backup.json');
 }
+// Persisted owner data remains readable during a temporary NCM outage at boot.
+await selectAccountState(startupIdentity.authenticated ? startupIdentity : savedConnection.accountKey
+  ? { authenticated:true, accountKey:savedConnection.accountKey } : startupIdentity);
+let connectingAccount = false;
+async function connectAccount(cookie) {
+  if (connectingAccount) throw new Error('登录正在进行，请稍后重试');
+  connectingAccount = true;
+  try {
+    const check = createProfileSync({ dataDir:DATA_DIR, ncm:createNcmClient({ baseUrl:NCM_API_BASE, cookie }) });
+    const identity = await check.identity();
+    const owner = startupIdentity.authenticated ? startupIdentity.accountKey : savedConnection.accountKey;
+    if (owner && owner !== identity.accountKey) throw new Error('此实例已绑定其他网易云账号，请使用原账号登录；切换账号需单独迁移');
+    await stateWriteQueue;
+    await atomicJson(connectionFile, { cookie, accountKey:identity.accountKey });
+    await selectAccountState({ ...identity, authenticated:true });
+    NCM_COOKIE = cookie;
+    Object.assign(savedConnection, { accountKey:identity.accountKey });
+    identityCache = { ...identity, authenticated:true, expiresAt:Date.now()+60000 };
+    startupIdentity = identityCache;
+    firstSyncAttempted = false;
+  } finally { connectingAccount = false; }
+}
+
 
 const radioService = createRadioService({ readState, mutateState, model: recommendationModel, brain: AI_PROVIDER,
   voiceProvider: TTS_PROVIDER, ncm:ncmV2, notify: () => agentService.notify() });
@@ -191,14 +241,27 @@ const agentService = await createAgentService({ dataDir: DATA_DIR, port: PORT, r
     if (identity.accountKey !== startupIdentity.accountKey) throw Object.assign(new Error('账号状态已变化，请重启音乐服务重新连接'), { status: 'unauthorized' });
     return identity;
   },
+  requestGuard: req => access.assertRequest(req),
+  runInPlayerScope: (player, task) => deviceState.run(player?.deviceId, task),
   ncm: ncmV2, profileSync, playability: playabilityV2, listeningEvents,
   abortRecommendations: () => { for (const controller of activeRecommendations.values()) controller.abort(); activeRecommendations.clear(); },
 });
 
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-
+const instanceRoute = createInstanceRoutes({ ncmBase:NCM_API_BASE, connectAccount, access,
+  getAccount:() => getV2Identity(), getBridge:() => readJson(resolve(DATA_DIR, 'agent-bridge.json')),
+  exportBackup:async()=>buildOwnerBackup({accountKey:savedConnection.accountKey || (await getV2Identity()).accountKey,
+    state:JSON.parse(await readDataFile(STATE_FILE,'utf8')),readJson:path=>readJson(resolve(DATA_DIR,path))}) });
+const runtimeFile=resolve(DATA_DIR,'cloud-runtime.json');
+const lookupFile=resolve(DATA_DIR,'agent-lookups.json');
+const handler=async (req,res)=>{
   try {
+    const url = new URL(req.url || "/", "http://localhost");
+    if (req.method === 'GET' && url.pathname === '/healthz') { sendJson(res, 200, {ok:true}); return; }
+    if (await access.route(req, res, url, readJsonBody)) return;
+    if(dataStoreEnabled() && url.pathname==='/api/player/events') {res.writeHead(204);res.end();return;}
+    if (await instanceRoute(req, res, url, readJsonBody)) return;
+    if (url.pathname === '/signin') { await serveStatic(res, '/signin.html'); return; }
+    if (url.pathname === '/settings') { await serveStatic(res, '/settings.html'); return; }
     if (url.pathname.startsWith("/api/")) {
       await routeApi(req, res, url);
       return;
@@ -206,15 +269,50 @@ const server = createServer(async (req, res) => {
 
     await serveStatic(res, url.pathname);
   } catch (error) {
-    console.error(error);
-    sendJson(res, 500, {
+    console.error('Request failed:', error.httpStatus || 500);
+    if (res.headersSent) { res.destroy(); return; }
+    sendJson(res, error.httpStatus || 500, {
       ok: false,
       error: error instanceof Error ? error.message : "Unknown error",
     });
   }
-});
+};
 
-server.listen(PORT, () => {
+const server = createServer((req,res)=>deviceState.run(req.headers['x-awudio-device'],()=>cloudRequest(req,res,async()=>{
+  if(dataStoreEnabled() && (req.url.startsWith('/api/music/stream') || req.url.startsWith('/api/tts/audio/'))) {
+    const saved=await readJson(connectionFile,{});NCM_COOKIE=saved.cookie || process.env.NCM_COOKIE || '';
+  }
+  return handler(req,res);
+},{before:async()=>{
+  const value=await readJson(runtimeFile,{});agentService.importRuntime(value.agent);access.importRuntime(value.access);instanceRoute.importRuntime(value.instance);
+  // Catalog search evidence is needed for tool calls, never for player/Agent heartbeats.
+  // Preserve references from the previous combined runtime on the first new request.
+  if(value.agent?.sessions?.some(([,session])=>session.lookups?.length)){
+    await atomicJson(lookupFile,{...await readJson(lookupFile,{}),...agentService.exportLookups()});
+  }
+  if(req.url.startsWith('/api/agent/call'))agentService.importLookups(await readJson(lookupFile,{}));
+  await access.reload();
+  const saved=await readJson(connectionFile,{});
+  const nextCookie=saved.cookie || process.env.NCM_COOKIE || '';
+  if(nextCookie!==NCM_COOKIE){NCM_COOKIE=nextCookie;identityCache=null;}
+  for(const key of Object.keys(savedConnection))delete savedConnection[key];
+  Object.assign(savedConnection,saved);
+  if(saved.accountKey)await selectAccountState({authenticated:true,accountKey:saved.accountKey});
+  else if(!NCM_COOKIE){
+    startupIdentity={authenticated:false,accountKey:accountKey(createHash('sha256').update('anonymous').digest('hex'))};
+    STATE_FILE=resolve(DATA_DIR,'state.json');STATE_BACKUP_FILE=resolve(DATA_DIR,'state.backup.json');
+  }
+},after:async()=>{
+  if(req.url.startsWith('/api/agent/call'))await atomicJson(lookupFile,agentService.exportLookups());
+  await atomicJson(runtimeFile,{agent:agentService.exportRuntime({includeLookups:false}),access:access.exportRuntime(),instance:instanceRoute.exportRuntime()});
+},
+ invalidate:()=>{identityCache=null;listeningEvents.clearCache();}})).catch(()=>{
+  if(res.destroyed)return;
+  if(res.headersSent){res.destroy();return;}
+  sendJson(res,503,{ok:false,error:'云端服务暂时不可用，请稍后重试'});
+}));
+
+server.listen(PORT, access.remote ? (process.env.HOST || '0.0.0.0') : '127.0.0.1', () => {
   console.log(`Awudio MVP running at http://localhost:${PORT}`);
   console.log(`AI brain: ${describeAiBrain()}`);
   console.log(`Netease adapter: ${NCM_API_BASE || "demo mode"}`);
@@ -222,6 +320,9 @@ server.listen(PORT, () => {
 });
 
 async function routeApi(req, res, url) {
+  if (req.method === 'POST' && mobileRequest(req) && ['/api/chat','/api/chat/stream','/api/radios/studio'].includes(url.pathname)) {
+    sendJson(res,403,{ok:false,error:'请在电脑端通过 Agent 推荐或制作电台'});return;
+  }
   if (await agentService.route(req, res, url, readJsonBody)) return;
   if (req.method === 'POST') agentService.guardBrowserMutation(req);
   if (url.pathname === '/api/radios/studio' && req.method === 'POST') {
@@ -244,7 +345,9 @@ async function routeApi(req, res, url) {
   }
   if (req.method === "POST" && url.pathname === "/api/profile/sync") {
     await getV2Identity(true);
-    sendJson(res, 202, { ok: true, ...profileSync.start() });
+    profileSync.start();
+    if(dataStoreEnabled())await profileSync.wait();
+    sendJson(res, dataStoreEnabled()?200:202, { ok:true,...profileSync.status() });
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/profile/status") {
@@ -288,7 +391,9 @@ async function routeApi(req, res, url) {
       openai: Boolean(OPENAI_API_KEY),
       openaiModel: OPENAI_MODEL,
       ncm: Boolean(NCM_API_BASE),
-      ncmBase: NCM_API_BASE || null,
+      instanceMode: access.remote ? "server" : "local",
+      playerEvents:!dataStoreEnabled(),
+      durableStorage:dataStoreEnabled() ? "postgres":"filesystem",
       tts: {
         provider: TTS_PROVIDER,
         fishAudio: Boolean(FISH_AUDIO_API_KEY),
@@ -617,7 +722,7 @@ async function synthesizeFishAudio(text, options = {}) {
   const filePath = resolve(TTS_CACHE_DIR, fileName);
   const audioUrl = `/api/tts/audio/${fileName}`;
 
-  if (existsSync(filePath)) {
+  if (await dataExists(filePath)) {
     return {
       voiceCueId,
       audioUrl,
@@ -669,7 +774,7 @@ async function synthesizeFishAudio(text, options = {}) {
 
   const bytes = Buffer.from(await response.arrayBuffer());
   if (!bytes.length) throw new Error("Fish Audio returned empty audio");
-  await writeFile(filePath, bytes);
+  await writeDataFile(filePath, bytes);
 
   return {
     voiceCueId,
@@ -688,16 +793,16 @@ async function serveTtsAudio(res, pathname) {
   }
 
   const filePath = resolve(TTS_CACHE_DIR, rawName);
-  if (!filePath.startsWith(TTS_CACHE_DIR) || !existsSync(filePath)) {
+  if (!filePath.startsWith(TTS_CACHE_DIR) || !await dataExists(filePath)) {
     sendJson(res, 404, { ok: false, error: "TTS audio not found" });
     return;
   }
 
-  const body = await readFile(filePath);
+  const body = await readDataFile(filePath);
   const type = CONTENT_TYPES[extname(filePath)] || "audio/mpeg";
   res.writeHead(200, {
     "Content-Type": type,
-    "Cache-Control": "public, max-age=31536000, immutable",
+    "Cache-Control": "private, no-store",
     "Content-Length": String(body.length),
   });
   res.end(body);
@@ -774,7 +879,7 @@ async function createV2ChatResponse(message, conversation, options) {
   const identity = await getV2Identity();
   if (identity.authenticated) await listeningEvents.migrate(identity.accountKey, state);
   const profile = await profileSync.read(identity.accountKey);
-  if (!profile && identity.authenticated && !firstSyncAttempted) { firstSyncAttempted = true; profileSync.start(); }
+  if (!profile && identity.authenticated && !firstSyncAttempted) { firstSyncAttempted = true; profileSync.start(); if(dataStoreEnabled())await profileSync.wait(); }
   const learning = await listeningEvents.summary(identity.accountKey);
   const result = await recommend({ message, options, state, profile, learning, accountKey: identity.accountKey, ncm: ncmV2,
     model: recommendationModel, playability: playabilityV2, traceStore, featureCache: profileSync, signal: options.signal, onStatus: options.onStatus });
@@ -1525,10 +1630,12 @@ async function streamNcmTrack(req, res, url) {
 
   if (req.headers.range) headers.Range = req.headers.range;
 
-  const upstream = await fetch(details.url, {
-    headers,
-    redirect: "follow",
-  });
+  const controller = new AbortController();
+  res.once('close', () => controller.abort());
+  const headerDeadline = setTimeout(() => controller.abort(), 15000);
+  let upstream;
+  try { upstream = await fetch(details.url, { headers, redirect:'follow', signal:controller.signal }); }
+  finally { clearTimeout(headerDeadline); }
 
   if (!upstream.ok && upstream.status !== 206) {
     sendJson(res, upstream.status, {
@@ -1557,7 +1664,9 @@ async function streamNcmTrack(req, res, url) {
     return;
   }
 
-  Readable.fromWeb(upstream.body).pipe(res);
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
 }
 
 async function getNcmAccount() {
@@ -1739,7 +1848,7 @@ async function serveStatic(res, pathname) {
   const cleanPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
   const filePath = resolve(join(PUBLIC_DIR, cleanPath));
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (!filePath.startsWith(PUBLIC_DIR + "/")) {
     sendText(res, 403, "Forbidden");
     return;
   }
@@ -1751,7 +1860,7 @@ async function serveStatic(res, pathname) {
 
   const body = await readFile(filePath);
   const type = CONTENT_TYPES[extname(filePath)] || "application/octet-stream";
-  res.writeHead(200, { "Content-Type": type });
+  res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-cache, must-revalidate" });
   res.end(body);
 }
 
@@ -1767,22 +1876,23 @@ async function readJsonBody(req) {
 
 async function readState() {
   try {
-    const raw = await readFile(STATE_FILE, "utf8");
+    const raw = await readDataFile(STATE_FILE, "utf8");
     const state = mergeState(JSON.parse(raw));
     stateReadBases.set(state, structuredClone(state));
-    return state;
+    return deviceState.view(state);
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
     await writeState(DEFAULT_STATE);
-    return structuredClone(DEFAULT_STATE);
+    return deviceState.view(structuredClone(DEFAULT_STATE));
   }
 }
 
 async function mutateState(mutator) {
   const job = stateWriteQueue.catch(() => {}).then(async () => {
     let state;
-    try { state = mergeState(JSON.parse(await readFile(STATE_FILE, 'utf8'))); }
+    try { state = mergeState(JSON.parse(await readDataFile(STATE_FILE, 'utf8'))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; state = structuredClone(DEFAULT_STATE); }
+    deviceState.view(state);
     const result = await mutator(state);
     state.schemaVersion = Math.max(2, state.schemaVersion || 0);
     await writeStateAtomic(state);
@@ -1798,27 +1908,36 @@ async function writeState(state) {
 }
 
 async function writeStateAtomic(state) {
-  const mergedState = await mergeProtectedStateForWrite(state);
+  const packed = deviceState.pack(state);
+  if (stateReadBases.has(state)) stateReadBases.set(packed, stateReadBases.get(state));
+  const mergedState = await mergeProtectedStateForWrite(packed);
   const payload = JSON.stringify(mergedState, null, 2);
   const tmpFile = resolve(DATA_DIR, `state.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
 
-  if (existsSync(STATE_FILE)) {
-    await copyFile(STATE_FILE, STATE_BACKUP_FILE).catch(() => {});
+  if (await dataExists(STATE_FILE)) {
+    await copyDataFile(STATE_FILE, STATE_BACKUP_FILE).catch(() => {});
   }
 
-  await writeFile(tmpFile, payload, "utf8");
-  await rename(tmpFile, STATE_FILE);
+  if(dataStoreEnabled()){await atomicJson(STATE_FILE,mergedState);return;}
+  await writeDataFile(tmpFile, payload, "utf8");
+  await renameDataFile(tmpFile, STATE_FILE);
 }
 
 async function mergeProtectedStateForWrite(nextState) {
-  if (!existsSync(STATE_FILE)) return nextState;
+  if (!await dataExists(STATE_FILE)) return nextState;
 
   try {
-    const currentState = mergeState(JSON.parse(await readFile(STATE_FILE, "utf8")));
+    const currentState = mergeState(JSON.parse(await readDataFile(STATE_FILE, "utf8")));
     const base = stateReadBases.get(nextState);
     const merged = { ...currentState };
     for (const [key, value] of Object.entries(nextState)) {
       if (!base || JSON.stringify(value) !== JSON.stringify(base[key])) merged[key] = value;
+    }
+    if (base && nextState.deviceQueues) {
+      merged.deviceQueues = { ...currentState.deviceQueues };
+      for (const [id, device] of Object.entries(nextState.deviceQueues)) {
+        if (JSON.stringify(device) !== JSON.stringify(base.deviceQueues?.[id])) merged.deviceQueues[id] = device;
+      }
     }
     merged.radioHistory = mergeRadioHistoryForWrite(nextState.radioHistory, currentState.radioHistory);
     return merged;
@@ -1838,7 +1957,7 @@ function mergeRadioHistoryForWrite(nextItems, currentItems) {
 }
 
 function sendJson(res, status, payload) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control":"no-store" });
   res.end(JSON.stringify(payload));
 }
 
@@ -1991,13 +2110,13 @@ function normalizeIsoDate(value) {
 
 async function readListeningProfile() {
   try {
-    const raw = await readFile(LISTENING_PROFILE_FILE, "utf8");
+    const raw = await readDataFile(LISTENING_PROFILE_FILE, "utf8");
     const profile = JSON.parse(raw);
     if (profile.accountKey && profile.accountKey !== (await getV2Identity()).accountKey) return createEmptyListeningProfile();
     return profile;
   } catch {
     const profile = createEmptyListeningProfile();
-    await writeFile(LISTENING_PROFILE_FILE, JSON.stringify(profile, null, 2), "utf8");
+    await writeDataFile(LISTENING_PROFILE_FILE, JSON.stringify(profile, null, 2), "utf8");
     return profile;
   }
 }

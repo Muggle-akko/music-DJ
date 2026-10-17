@@ -1,0 +1,15 @@
+FROM node:24.15.0-alpine
+WORKDIR /app
+ENV NODE_ENV=production PORT=8080 AWUDIO_MODE=server AWUDIO_DEPLOYMENT=vercel AWUDIO_DATA_DIR=/tmp/awudio
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+COPY services/netease-api/package.json services/netease-api/package-lock.json ./services/netease-api/
+RUN cd services/netease-api && npm ci --omit=dev --ignore-scripts
+COPY --chown=node:node server.mjs ./
+COPY --chown=node:node lib ./lib
+COPY --chown=node:node public ./public
+COPY --chown=node:node scripts/vercel-start.mjs ./scripts/vercel-start.mjs
+COPY --chown=node:node services/netease-api/ ./services/netease-api/
+USER node
+EXPOSE 8080
+CMD ["node","scripts/vercel-start.mjs"]

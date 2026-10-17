@@ -1,9 +1,15 @@
-import { createListeningController } from "/listening.mjs";
-import { createAgentController } from "/agent.mjs";
-import { createRadioStudio } from "/radio.mjs";
+import { createTrackWaveform } from "/waveform.mjs?v=33";
+import { mobileClient } from "/device-policy.mjs?v=33";
+import { createMobileWorkspace } from "/mobile.mjs?v=33";
+import { createMediaSession } from "/media-session.mjs?v=33";
+import { browserDataCache, apiFetch } from "/network.mjs?v=33";
+import { createListeningController } from "/listening.mjs?v=33";
+import { createAgentController } from "/agent.mjs?v=33";
+import { createRadioStudio } from "/radio.mjs?v=33";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
+const trackWaveform = createTrackWaveform();
 const aiInput = document.querySelector("#aiInput");
 const aiComposer = document.querySelector("#aiComposer");
 const searchInput = document.querySelector("#searchInput");
@@ -204,9 +210,11 @@ let spectrumFallFrame = 0;
 let spectrumLevels = Array.from({ length: SEGMENT_COUNT }, () => 12);
 let spectrumFallVelocity = Array.from({ length: SEGMENT_COUNT }, () => 0);
 
+let mediaControls;
 init();
 
 async function init() {
+  createMobileWorkspace();
   voiceAudio.preload = "auto";
   renderSegments(0);
   resetHostCaptionDisplay();
@@ -215,12 +223,14 @@ async function init() {
   tickClock();
   updateDateInfo();
   setInterval(tickClock, 1000);
+  mediaControls=createMediaSession({audio,getTrack:()=>currentTrack,next:()=>playNext(),previous:()=>playPrevious(),notice:showNotice});
   bindEvents();
   setPlayMode(playMode);
   setVolume(volume, { save: false });
   await loadConfig();
   await loadNeteaseAccount();
   scopeBrowserStorage(accountUserId || 'guest');
+  browserDataCache.useScope(accountUserId || 'guest');
   likedTrackKeys = loadLikedTrackKeys();
   likedTracks = loadLikedTracks();
   aiChatMessages = loadAiChatMessages();
@@ -231,11 +241,11 @@ async function init() {
   if (accountUserId) listeningController = createListeningController({ audio, getTrack: () => currentTrack, post: postJson, accountId: accountUserId, clientId: eventClientId });
   localStorage.removeItem('awudio.recommenderVersion');
   radioStudio = createRadioStudio({flushQueue:flushQueueWrites,getRevision:()=>serverQueueRevision,notice:showNotice,
-    onSaved:async radio=>{upsertRadioHistoryItem(radio);await loadRadioHistory({silent:true});}});
-  externalAgentController = createAgentController({ getPlayback: externalPlaybackState, flushQueue: flushQueueWrites,
+    onSaved:async radio=>{upsertRadioHistoryItem(radio);await loadRadioHistory({silent:true,force:true});}});
+  externalAgentController = createAgentController({ events:playerEventsEnabled,getPlayback: externalPlaybackState, flushQueue: flushQueueWrites,
     syncQueue: syncExternalQueue, syncFeedback: syncExternalFeedback, execute: executeExternalCommand, renderPlans: renderExternalPlans,
     pause: () => audio.pause(), resume: () => togglePlay(), notice: showNotice,
-    onRadioChange: () => { void loadRadioHistory({silent:true}); },
+    onRadioChange: () => { void loadRadioHistory({silent:true,force:true}); },
     onMode: mode => {
       if (mode === 'external') latestRecommendationRequest = '';
       brainStatus.textContent = mode === 'external' ? '[选歌: 外部 Agent]' : builtinBrainLabel;
@@ -246,7 +256,7 @@ async function init() {
 
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.register("/sw.js?v=33");
     } catch {
       // PWA cache is optional.
     }
@@ -293,7 +303,7 @@ function bindEvents() {
     playlistLibraryScroll.scrollTop = libraryScrollTop;
   });
   morePlaylistsButton.addEventListener("click", () => loadUserPlaylists({ append: true }));
-  document.querySelector("#refreshTracksButton").addEventListener("click", () => loadPlaylistTracks(selectedPlaylist));
+  document.querySelector("#refreshTracksButton").addEventListener("click", () => loadPlaylistTracks(selectedPlaylist, {force:true}));
   moreTracksButton.addEventListener("click", () => loadPlaylistTracks(selectedPlaylist, { append: true }));
   playPlaylistButton.addEventListener("click", () => {
     replaceQueueWithTracks(playlistTracks, { fullPlaylist: true });
@@ -311,7 +321,7 @@ function bindEvents() {
   });
   generatePlaylistButton.addEventListener("click", generateAiPlaylist);
   clearAiChatButton.addEventListener("click", clearAiChat);
-  loadPlaylistsButton.addEventListener("click", () => loadUserPlaylists());
+  loadPlaylistsButton.addEventListener("click", () => loadUserPlaylists({force:true}));
   queueTab.addEventListener("click", () => setQueueView("queue"));
   likedTab.addEventListener("click", () => setQueueView("liked"));
   historyTab.addEventListener("click", () => {
@@ -360,12 +370,16 @@ function bindEvents() {
   audio.addEventListener("playing", () => {
     startSpectrumMeter();
     updateHostIntroDisplay();
+    refreshPlayStateForCurrent();
     maybeStartHostIntroVoice();
     scheduleHostIntroVoiceCheck();
   });
+  for (const event of ["waiting", "stalled"]) audio.addEventListener(event, event => {
+    if (!audio.paused && !audio.ended && (event.type === "waiting" || audio.readyState < 3)) setPlayState("[缓冲中]", false);
+  });
   audio.addEventListener("play", () => {
     startSpectrumMeter();
-    setPlayState("[播放中]", true);
+    setPlayState(audio.readyState >= 3 ? "[播放中]" : "[缓冲中]", audio.readyState >= 3);
     playButton.setAttribute("aria-label", "暂停");
     playButton.title = "暂停";
     setPlayIcon(false);
@@ -416,9 +430,11 @@ function bindEvents() {
   voiceAudio.addEventListener("ended", handleVoiceAudioEnded);
 }
 
+let playerEventsEnabled = true;
 let builtinBrainLabel = '[大脑: 本地规则]';
 async function loadConfig() {
   const data = await getJson("/api/config");
+  playerEventsEnabled=data.playerEvents!==false;
   brainStatus.textContent =
     data.aiProvider === "local" ? "[大脑: 本地规则]" : `[大脑: ${data.aiModel}]`;
   builtinBrainLabel = brainStatus.textContent;
@@ -427,7 +443,7 @@ async function loadConfig() {
 
 async function loadRadioHistory(options = {}) {
   try {
-    const data = await getJson("/api/radios");
+    const data = await getJson("/api/radios", {cache:options.force ? "reload" : "default"});
     radioHistory = normalizeClientRadioHistory(data.radios || []);
     if (queueView === "history") renderQueue();
   } catch (error) {
@@ -603,7 +619,7 @@ async function streamDjResponse(message, assistantMessageId, conversation, optio
   options = { ...options, requestId, queueMutationVersion };
   const requestPayload = { message, conversation, mode: options.mode || 'chat', limit: options.limit || CHAT_RECOMMENDATION_LIMIT,
     clientContext: getClientContext(), algorithmVersion, clientId: eventClientId, requestId, expectedQueueRevision: serverQueueRevision };
-  const response = await fetch("/api/chat/stream", {
+  const response = await apiFetch("/api/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestPayload),
@@ -753,7 +769,7 @@ async function searchMusic() {
   }
 }
 
-async function loadUserPlaylists({ append = false } = {}) {
+async function loadUserPlaylists({ append = false, force = false } = {}) {
   if (append && busyScopes.has("library")) return;
   const version = ++libraryRequestVersion;
   setBusy(true, null, "library");
@@ -763,7 +779,7 @@ async function loadUserPlaylists({ append = false } = {}) {
     if (version !== libraryRequestVersion) return;
     if (!accountUserId) throw new Error("网易云未登录，请检查本地登录配置后刷新");
     const offset = append ? playlistOffset : 0;
-    const data = await getJson(`/api/music/playlists?uid=${encodeURIComponent(accountUserId)}&limit=${PAGE_LOAD_SIZE}&offset=${offset}`);
+    const data = await getJson(`/api/music/playlists?uid=${encodeURIComponent(accountUserId)}&limit=${PAGE_LOAD_SIZE}&offset=${offset}`, {cache:force ? "reload" : "default"});
     if (version !== libraryRequestVersion) return;
     const page = data.playlists || [];
     playlists = append ? [...new Map([...playlists, ...page].map(item => [String(item.id), item])).values()] : page;
@@ -779,7 +795,7 @@ async function loadUserPlaylists({ append = false } = {}) {
   }
 }
 
-async function loadPlaylistTracks(playlist, { append = false } = {}) {
+async function loadPlaylistTracks(playlist, { append = false, force = false } = {}) {
   if (!playlist?.id || (append && busyScopes.has("tracks"))) return;
   const version = ++playlistRequestVersion;
   const switching = String(playlist.id) !== String(selectedPlaylistId);
@@ -800,7 +816,7 @@ async function loadPlaylistTracks(playlist, { append = false } = {}) {
   playlistReason.textContent = append ? "正在加载更多歌曲…" : "正在读取歌曲并检查播放权限…";
   try {
     const offset = append ? playlistTrackOffset : 0;
-    const data = await getJson(`/api/music/playlist-tracks?id=${encodeURIComponent(playlist.id)}&limit=${PAGE_LOAD_SIZE}&offset=${offset}`);
+    const data = await getJson(`/api/music/playlist-tracks?id=${encodeURIComponent(playlist.id)}&limit=${PAGE_LOAD_SIZE}&offset=${offset}`, {cache:force ? "reload" : "default"});
     if (version !== playlistRequestVersion) return;
     const page = data.tracks || [];
     playlistTracks = append ? dedupeTracks([...playlistTracks, ...page]) : page;
@@ -817,7 +833,7 @@ async function loadPlaylistTracks(playlist, { append = false } = {}) {
   }
 }
 
-function addPlayableTracks(tracks, { next = false } = {}) {
+function addPlayableTracks(tracks, { next = false, front = false } = {}) {
   const playableTracks = tracks.filter(isPlayable).map(normalizeClientTrack);
   if (!playableTracks.length) { showNotice("没有可播放的歌曲"); return 0; }
   const currentKey = currentTrack ? trackKey(currentTrack) : "";
@@ -829,7 +845,8 @@ function addPlayableTracks(tracks, { next = false } = {}) {
   });
   const room = Math.max(0, MAX_QUEUE - queue.length);
   const accepted = newTracks.slice(0, room);
-  if (next) queue.splice(Math.max(0, currentIndex + 1), 0, ...accepted);
+  if (front) queue.unshift(...accepted);
+  else if (next) queue.splice(Math.max(0, currentIndex + 1), 0, ...accepted);
   else queue.push(...accepted);
   if (currentKey) {
     currentIndex = queue.findIndex(track => trackKey(track) === currentKey);
@@ -842,7 +859,7 @@ function addPlayableTracks(tracks, { next = false } = {}) {
   if (!currentKey) renderCurrentTrack();
   renderQueue(); persistQueue();
   refreshResultActions();
-  showNotice(accepted.length ? `已${next ? "安排下一首播放" : "加入队尾"} ${accepted.length} 首${accepted.length < newTracks.length ? "，队列已满" : ""}` : newTracks.length ? "队列已满，请先移除部分歌曲" : "已在队列中");
+  showNotice(accepted.length ? `已${front ? "加入队首" : next ? "安排下一首播放" : "加入队尾"} ${accepted.length} 首${accepted.length < newTracks.length ? "，队列已满" : ""}` : newTracks.length ? "队列已满，请先移除部分歌曲" : "已在队列中");
   return accepted.length;
 }
 
@@ -851,7 +868,7 @@ async function playResultTrack(track) {
   let index = queue.findIndex(item => trackKey(item) === trackKey(track));
   if (index < 0) {
     if (queue.length >= MAX_QUEUE) { showNotice("队列已满，请先移除部分歌曲"); return; }
-    addPlayableTracks([track]);
+    addPlayableTracks([track], { front:true });
     index = queue.findIndex(item => trackKey(item) === trackKey(track));
   }
   setQueueView("queue");
@@ -924,7 +941,16 @@ async function togglePlay() {
     return;
   }
 
-  if (audio.paused) {
+  if (audio.error) {
+    const track = currentTrack, position = audio.currentTime;
+    const retry = new URL(track.url, location.href); retry.searchParams.set('retry',String(Date.now()));
+    audio.addEventListener('loadedmetadata',()=>{if(currentTrack===track && Number.isFinite(position) && position>0)audio.currentTime=position;},{once:true});
+    audio.src=retry.href;
+    await audio.play();
+  } else if (mediaControls?.buffering && !audio.paused) {
+    audio.pause();
+    await audio.play();
+  } else if (audio.paused) {
     await audio.play();
   } else {
     audio.pause();
@@ -1435,6 +1461,7 @@ function removeQueueItem(index) {
 }
 
 function renderCurrentTrack() {
+  mediaControls?.update();
   if (!currentTrack) {
     trackInfo.textContent = "等待推荐或搜索";
     currentLyrics = [];
@@ -1924,6 +1951,13 @@ function clearHostIntroVoiceTimer() {
 }
 
 function handleVisibilityChange() {
+  if (document.hidden) trackWaveform.abort();
+  if (!document.hidden) {
+    if(mobileClient && !audio.paused)void trackWaveform.load(audio.currentSrc);
+    refreshPlayStateForCurrent();
+    mediaControls?.update();
+    externalAgentController?.refresh();
+  }
   if (document.hidden) completeActiveDuckingAnimation();
   maybeStartHostIntroVoice();
   scheduleHostIntroVoiceCheck();
@@ -2376,7 +2410,7 @@ function renderRadioHistory() {
     const empty = document.createElement("li");
     empty.className = "queue-item radio-history-item is-empty";
     empty.innerHTML =
-      '<span class="queue-index">--</span><div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div><div class="queue-title"><strong>暂无历史电台</strong><span>点击“制作电台”，保存曲目与解说</span></div><span class="queue-duration">--</span>';
+      '<span class="queue-index">--</span><div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div><div class="queue-title"><strong>暂无历史电台</strong><span>在电脑上制作的电台会出现在这里</span></div><span class="queue-duration">--</span>';
     queueList.append(empty);
     return;
   }
@@ -2399,7 +2433,7 @@ function renderRadioHistory() {
         <strong>${escapeHtml(radio.title || "历史电台")}</strong>
         <span>${escapeHtml(details)}</span>
       </div>
-      <button class="text-action radio-edit-button" type="button">编辑</button>
+      <button class="text-action radio-edit-button desktop-producer" type="button">编辑</button>
       <button class="mini-action" type="button">载入</button>
     `;
 
@@ -2446,6 +2480,7 @@ function formatRadioCreatedAt(value) {
 }
 
 function renderResults(listElement, countElement, tracks, unit = "首") {
+  const showFeedback = listElement !== playlistTracksList;
   countElement.textContent = tracks.length ? `${tracks.length} ${unit}` : "";
   listElement.innerHTML = "";
   if (!tracks.length) {
@@ -2462,12 +2497,12 @@ function renderResults(listElement, countElement, tracks, unit = "首") {
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
       <div class="queue-actions"><button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!playable}" aria-label="加入队列" title="加入队列" ${playable ? "" : "disabled"}>${icon("queue")}</button>
       <button class="menu-button" type="button" aria-label="更多操作" title="更多操作" aria-expanded="false" ${playable ? "" : "disabled"}>${icon("dots-three")}</button>
-      <div class="queue-menu" hidden><button type="button" data-action="next">下一首播放</button><button type="button" data-action="not-now">现在不合适</button><button type="button" data-action="dislike">不喜欢</button><button type="button" data-action="explain">为什么推荐</button></div></div>`;
+      <div class="queue-menu" hidden><button type="button" data-action="next">下一首播放</button>${showFeedback ? '<button type="button" data-action="not-now">现在不合适</button><button type="button" data-action="dislike">不喜欢</button><button type="button" data-action="explain">为什么推荐</button>' : ''}</div></div>`;
     item.querySelector(".track-play").addEventListener("click", () => playResultTrack(track));
     item.querySelector("[data-add-track]").addEventListener("click", () => addPlayableTracks([track]));
     item.querySelector(".menu-button").addEventListener("click", event => { event.stopPropagation(); toggleQueueMenu(item); });
     item.querySelector('[data-action="next"]').addEventListener("click", () => scheduleNextTrack(track));
-    bindFeedbackMenu(item, track);
+    if (showFeedback) bindFeedbackMenu(item, track);
     listElement.append(item);
   });
   refreshResultActions();
@@ -2563,6 +2598,7 @@ function renderSegments(ratio) {
 }
 
 function startSpectrumMeter() {
+  if(mobileClient && !document.hidden && audio.currentSrc)void trackWaveform.load(audio.currentSrc);
   if (!progressSegments || spectrumFrame) return;
   if (spectrumFallFrame) {
     window.cancelAnimationFrame(spectrumFallFrame);
@@ -2589,7 +2625,8 @@ function stopSpectrumMeter() {
 }
 
 function ensureSpectrumAnalyser() {
-  if (spectrumAnalyser || !window.AudioContext && !window.webkitAudioContext) return;
+  // Keep iOS/Android media on the native audio path: Web Audio may be suspended at lock.
+  if (mobileClient || spectrumAnalyser || !window.AudioContext && !window.webkitAudioContext) return;
 
   try {
     const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
@@ -2620,7 +2657,7 @@ function updateSpectrumBars(options = {}) {
   bars.forEach((bar, index) => {
     const level = hasSignal
       ? getAnalyserSpectrumLevel(index)
-      : getFallbackSpectrumLevel(index);
+      : trackWaveform.level(audio.currentTime,index,SEGMENT_COUNT,audio.volume,audio.muted);
     spectrumLevels[index] = level;
     bar.style.setProperty("--segment-level", `${level}%`);
   });
@@ -2673,14 +2710,8 @@ function getAnalyserSpectrumLevel(index) {
   return Math.round(14 + level * 82);
 }
 
-function getFallbackSpectrumLevel(index) {
-  const time = Number.isFinite(audio.currentTime) ? audio.currentTime : performance.now() / 1000;
-  const wave =
-    Math.sin(time * 3.1 + index * 0.55) * 0.5 +
-    Math.sin(time * 1.65 + index * 0.23) * 0.32 +
-    Math.sin(time * 5.4 + index * 0.11) * 0.18;
-  const normalized = (wave + 1) / 2;
-  return Math.round(16 + normalized * 64);
+function getFallbackSpectrumLevel() {
+  return 6; // No synthetic rhythm when no measured audio data is available.
 }
 
 function activateTab(tab) {
@@ -2793,6 +2824,7 @@ function normalizePlayStateLabel(text, isPlaying) {
   const raw = String(text || "").replace(/[\[\]【】]/g, "").trim();
   if (isPlaying && /主播|讲解|host|air/i.test(raw)) return "ON AIR";
   if (isPlaying) return "LIVE";
+  if (/缓冲|等待|waiting/i.test(raw)) return "BUFFERING";
   if (/暂停|paused/i.test(raw)) return "PAUSED";
   if (/空闲|idle/i.test(raw)) return "IDLE";
   if (/就绪|点击播放|ready/i.test(raw)) return "READY";
@@ -2815,6 +2847,11 @@ function refreshPlayStateForCurrent() {
     return;
   }
 
+  if (!audio.paused && mediaControls?.buffering) {
+    setPlayState("[缓冲中]", false);
+    return;
+  }
+
   if (isAudioPlaying()) {
     setPlayState("[播放中]", true);
     return;
@@ -2829,7 +2866,7 @@ function refreshPlayStateForCurrent() {
 }
 
 function isAudioPlaying() {
-  return Boolean(currentTrack && !audio.paused && !audio.ended);
+  return Boolean(currentTrack && !audio.paused && !audio.ended && audio.readyState >= 3 && !mediaControls?.buffering);
 }
 
 function isPlayable(track) {
@@ -3029,7 +3066,7 @@ async function saveQueue() {
   queueSavePromise = (async () => {
     while (queueDirty && !queueConflict) {
       const version = queueMutationVersion;
-      const response = await fetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const response = await apiFetch('/api/queue', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ queue, currentIndex, expectedRevision: serverQueueRevision }) });
       const saved = await response.json();
       if (response.status === 409) {
@@ -3181,21 +3218,14 @@ function renderExternalPlans(plans, apply) {
     const article = document.createElement('article'); article.className = 'agent-plan'; article.dataset.planId=plan.id;
     const title = document.createElement('h3'); title.textContent = plan.requestSummary;
     const meta = document.createElement('p'); meta.className = 'agent-plan-meta';
-    const expired = Date.parse(plan.expiresAt) < Date.now();
-    meta.textContent = `${plan.tracks.length} 首 · ${Math.round(plan.tracks.reduce((n, t) => n + t.duration, 0) / 60000)} 分钟${expired ? ' · 已过期' : ''}`;
-    const list = document.createElement('ol'); list.className = 'agent-track-list';
+    meta.textContent = `${plan.tracks.length} 首 · ${Math.round(plan.tracks.reduce((n, t) => n + t.duration, 0) / 60000)} 分钟`;
+    const list = document.createElement('ol'); list.className = 'agent-track-list agent-song-results';
     const reasons = document.createElement('details'); reasons.className = 'agent-plan-reasons';
     reasons.open=expanded.has(plan.id);
     const reasonsTitle = document.createElement('summary'); reasonsTitle.textContent = '选曲说明'; reasons.append(reasonsTitle);
+    const count = document.createElement('span');
+    renderResults(list, count, plan.tracks);
     for (const track of plan.tracks) {
-      const li = document.createElement('li');
-      const cover = document.createElement(track.cover ? 'img' : 'span'); cover.className = 'agent-track-cover';
-      if (track.cover) { cover.src = track.cover; cover.alt = ''; cover.loading = 'lazy'; }
-      const info = document.createElement('div'); info.className = 'agent-track-info';
-      const name = document.createElement('strong'); name.textContent = track.title; name.title = track.title;
-      const artist = document.createElement('span'); artist.textContent = track.artist; artist.title = track.artist;
-      const duration = document.createElement('span'); duration.className = 'agent-track-duration'; duration.textContent = formatTrackDuration(track.duration);
-      info.append(name, artist); li.append(cover, info, duration); list.append(li); observeRecommendationCard(li, track);
       if (track.reasonSummary) { const reason = document.createElement('p'); reason.textContent = `${track.title}：${track.reasonSummary}`; reasons.append(reason); }
     }
     const actions = document.createElement('div'); actions.className = 'agent-plan-actions';
@@ -3204,7 +3234,7 @@ function renderExternalPlans(plans, apply) {
       closeQueueMenus(); article.setAttribute('aria-busy', 'true');
       actionButtons.forEach(button => { button.disabled = true; });
       try { await apply(plan.id, queueMode, playback); }
-      finally { article.removeAttribute('aria-busy'); actionButtons.forEach(button => { button.disabled = Date.parse(plan.expiresAt) < Date.now(); }); }
+      finally { article.removeAttribute('aria-busy'); actionButtons.forEach(button => { button.disabled = false; }); }
     }
     for (const [label, symbol, css, queueMode, playback] of [
       ['播放', 'play-fill', '', 'replace_all', 'play_first'],
@@ -3213,17 +3243,17 @@ function renderExternalPlans(plans, apply) {
       const button = document.createElement('button'); button.className = `workspace-action ${css}`; button.type = 'button';
       button.innerHTML = icon(symbol); const labelNode = document.createElement('span'); labelNode.textContent = label; button.append(labelNode);
       button.title = playback === 'play_first' ? '播放这份推荐并替换队列' : '加入队尾，保持当前播放';
-      button.disabled = expired; button.addEventListener('click', () => run(queueMode, playback));
+      button.disabled = false; button.addEventListener('click', () => run(queueMode, playback));
       actionButtons.push(button); actions.append(button);
     }
     const more = document.createElement('button'); more.className = 'menu-button'; more.type = 'button';
     more.innerHTML = icon('dots-three'); more.setAttribute('aria-label', '更多歌单操作'); more.setAttribute('aria-expanded', 'false');
-    more.disabled = expired; more.addEventListener('click', () => toggleQueueMenu(article));
+    more.disabled = false; more.addEventListener('click', () => toggleQueueMenu(article));
     const menu = document.createElement('div'); menu.className = 'queue-menu'; menu.hidden = true; menu.dataset.label = '歌单操作';
     const replaceUpcoming = document.createElement('button'); replaceUpcoming.type = 'button'; replaceUpcoming.textContent = '替换待播，保留当前歌曲';
-    replaceUpcoming.disabled = expired; replaceUpcoming.addEventListener('click', () => run('replace_upcoming', 'keep'));
+    replaceUpcoming.disabled = false; replaceUpcoming.addEventListener('click', () => run('replace_upcoming', 'keep'));
     menu.append(replaceUpcoming); actions.append(more); actionButtons.push(more, replaceUpcoming);
-    const makeRadio=document.createElement('button');makeRadio.type='button';makeRadio.className='workspace-action ghost';makeRadio.textContent='制作电台';
+    const makeRadio=document.createElement('button');makeRadio.type='button';makeRadio.className='workspace-action ghost desktop-producer';makeRadio.textContent='制作电台';
     makeRadio.addEventListener('click',()=>{void radioStudio.open('plan',plan.id);});actions.insertBefore(makeRadio,more);
     article.append(title, meta, list);
     if (reasons.children.length > 1) article.append(reasons);
@@ -3285,32 +3315,20 @@ function daysUntilWeekend(date) {
 }
 
 function loadWeatherInfo() {
-  if (!navigator.geolocation) {
-    weatherInfo.textContent = "天气: 未授权";
-    return;
-  }
-
-  navigator.geolocation.getCurrentPosition(
-    async (position) => {
-      const { latitude, longitude } = position.coords;
-      try {
-        const data = await getJson(
-          `https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&current=temperature_2m,weather_code&timezone=auto`,
-        );
-        const current = data.current || {};
-        const temperature = Math.round(Number(current.temperature_2m));
-        weatherInfo.textContent = Number.isFinite(temperature)
-          ? `天气: ${translateWeatherCode(current.weather_code)} ${temperature}°C`
-          : `天气: ${translateWeatherCode(current.weather_code)}`;
-      } catch {
-        weatherInfo.textContent = "天气: 暂不可用";
-      }
-    },
-    () => {
-      weatherInfo.textContent = "天气: 未授权";
-    },
-    { maximumAge: 600000, timeout: 5000 },
-  );
+  weatherInfo.hidden=true;
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(async position=>{
+    const {latitude,longitude}=position.coords;
+    try {
+      const response=await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${latitude.toFixed(3)}&longitude=${longitude.toFixed(3)}&current=temperature_2m,weather_code&timezone=auto`,{signal:AbortSignal.timeout(8000)});
+      if(!response.ok)throw new Error('weather_unavailable');
+      const current=(await response.json()).current;
+      const temperature=current?.temperature_2m;
+      if(typeof temperature!=='number' || !Number.isFinite(temperature))return;
+      weatherInfo.textContent=`${translateWeatherCode(current.weather_code)} ${Math.round(temperature)}°C`;
+      weatherInfo.hidden=false;
+    } catch { weatherInfo.hidden=true; }
+  },()=>{weatherInfo.hidden=true;},{maximumAge:600000,timeout:5000,enableHighAccuracy:false});
 }
 
 function translateWeatherCode(code) {
@@ -3357,15 +3375,15 @@ function translateSource(value) {
   return map[value] || value;
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
+async function getJson(url, options = {}) {
+  const response = await apiFetch(url, options);
   const data = await response.json();
   if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
 async function postJson(url, payload) {
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

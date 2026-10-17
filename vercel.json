@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "env": {
+    "AWUDIO_MODE": "server",
+    "AWUDIO_DEPLOYMENT": "vercel",
+    "AWUDIO_DATA_DIR": "/tmp/awudio",
+    "PORT": "8080"
+  }
+}

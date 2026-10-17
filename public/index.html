@@ -2,12 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
     <title>Awudio - AI 音乐播放器</title>
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/fonts/google-fonts.css">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/fonts/google-fonts.css?v=33">
+    <link rel="stylesheet" href="/styles.css?v=33">
   </head>
   <body>
     <div class="app-shell">
@@ -20,16 +20,21 @@
           <span id="brainStatus">[大脑: 本地]</span>
           <span id="sourceValue">[来源: 演示]</span>
           <span id="moodValue">[心情: 随机]</span>
+          <a class="text-action instance-settings-link" href="/settings" target="_blank" rel="noopener">连接设置 ↗</a>
         </div>
-      </header>
+      <button id="mobileSettingsOpen" class="round-icon-button mobile-settings-open" type="button" aria-label="设置" aria-haspopup="dialog"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#gear-six"></use></svg></button></header>
 
       <main class="grid">
+        <section id="mobileDeck" class="mobile-deck" aria-label="音乐工作区" data-face="queue" hidden>
+          <header class="mobile-deck-heading"><h2 id="mobileDeckTitle">音乐库</h2><button id="mobileFlip" class="mobile-flip" type="button" aria-pressed="false" aria-label="翻到 Agent 推荐"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg><span id="mobileFlipLabel">发现音乐</span></button></header>
+          <div id="mobileDeckStage" class="mobile-deck-stage"></div>
+        </section>
         <section class="player-panel" aria-label="播放器">
           <div class="panel-heading">
             <div class="context-strip" aria-label="日期与天气">
               <span id="dateInfo">--</span>
               <span id="weekendInfo">--</span>
-              <span id="weatherInfo">天气: 获取中</span>
+              <span id="weatherInfo" hidden></span>
             </div>
             <span id="playState">[空闲]</span>
           </div>
@@ -45,7 +50,7 @@
             <span id="duration">--:--</span>
           </div>
 
-          <audio id="audio"></audio>
+          <audio id="audio" preload="auto" playsinline></audio>
 
           <div class="controls" aria-label="播放控制">
             <button class="icon-button" id="prevButton" type="button" aria-label="上一首" title="上一首">
@@ -124,10 +129,11 @@
             <section id="externalAgentPanel" class="external-agent-panel" aria-label="外部 Agent" hidden>
               <div class="agent-connection-row">
                 <span class="connection-status" id="agentConnectionState" data-state="waiting"><span class="connection-dot" aria-hidden="true"></span><span id="agentStatus" role="status">正在连接播放器…</span></span>
-                <button class="text-action" id="agentConnectionSettingsButton" type="button" aria-expanded="false" aria-controls="agentConnectionSettings">连接设置<svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#caret-right"></use></svg></button>
+                <div class="agent-connection-actions"><button class="round-icon-button" id="agentStatusRefreshButton" type="button" aria-label="刷新 Agent 连接状态" title="刷新 Agent 连接状态"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button>
+                <button class="text-action" id="agentConnectionSettingsButton" type="button" aria-expanded="false" aria-controls="agentConnectionSettings">连接设置<svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#caret-right"></use></svg></button></div>
               </div>
               <div class="agent-connection-settings" id="agentConnectionSettings" hidden>
-                <div class="agent-settings-heading"><span>播放设备</span><button class="round-icon-button" id="agentRefreshButton" type="button" aria-label="刷新连接" title="刷新连接"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button></div>
+                <div class="agent-settings-heading"><span>Agent 控制目标</span><button class="round-icon-button" id="agentRefreshButton" type="button" aria-label="刷新连接" title="刷新连接"><svg class="ph-icon" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#arrow-clockwise"></use></svg></button></div>
                 <p class="view-status" id="agentDeviceSummary">正在查找播放页面…</p>
                 <div class="agent-device-row" id="agentDeviceControls"><select id="agentPlayerSelect" aria-label="选择播放页面"></select><button class="workspace-action secondary" id="agentSelectPlayerButton" type="button">设为播放页面</button></div>
               </div>
@@ -208,6 +214,16 @@
       </main>
     </div>
 
+    <dialog id="mobileSettings" class="mobile-settings" aria-labelledby="mobileSettingsTitle">
+      <header class="mobile-settings-heading"><h2 id="mobileSettingsTitle">设置</h2><button id="mobileSettingsClose" class="text-action" type="button">完成</button></header>
+      <div class="mobile-settings-content">
+        <section class="mobile-setting-section"><h3>网易云音乐 <span id="connectionState" class="instance-badge">检查中</span></h3><p id="accountSummary" class="view-status"></p><button id="createQr" class="workspace-action secondary" type="button">扫码登录</button><div id="qrPanel" hidden><img id="qrImage" alt="网易云登录二维码" width="180" height="180"><p id="qrStatus" role="status"></p></div><details class="cookie-details"><summary>使用 Cookie 登录</summary><form id="cookieForm"><label class="radio-field">网易云 Cookie<textarea id="cookie" rows="3" autocomplete="off" spellcheck="false" required></textarea></label><button class="workspace-action secondary" type="submit">连接</button></form></details></section>
+        <section class="mobile-setting-section"><h3>播放设备</h3><label class="radio-field">设备名称<input id="deviceName" maxlength="50" placeholder="我的 iPhone"></label><button id="saveDevice" class="workspace-action secondary" type="button">保存名称</button><div id="mobilePlayerSettings"></div></section>
+        <section id="mobilePreferenceSettings" class="mobile-setting-section"></section>
+        <section id="remoteAgentSection" hidden><button id="downloadBridge" type="button" hidden>下载连接文件</button></section>
+        <section class="mobile-setting-section"><h3>资料备份</h3><button id="downloadBackup" class="workspace-action secondary" type="button">下载资料备份</button><p class="view-status">不包含音频和登录凭据</p></section><p id="settingsStatus" class="view-status" role="status"></p><footer class="mobile-settings-footer"><span id="instanceMode"></span><button id="signout" class="text-action" type="button" hidden>退出登录</button></footer>
+      </div>
+    </dialog>
     <dialog id="radioStudio" class="radio-studio" aria-labelledby="radioStudioTitle">
       <div class="radio-studio-header"><div><p class="label">RADIO STUDIO</p><h2 id="radioStudioTitle">制作一期电台</h2><p id="radioSourceSummary" class="view-status"></p></div><button id="radioClose" class="workspace-action ghost" type="button" aria-label="关闭电台制作">关闭</button></div>
       <div class="radio-studio-scroll">
@@ -226,6 +242,6 @@
       </div>
       <div class="radio-studio-footer"><p id="radioStudioStatus" class="view-status" role="status"></p><button id="radioSave" type="button" class="workspace-action">保存为历史电台</button></div>
     </dialog>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=33" type="module"></script>
   </body>
 </html>

@@ -6,3 +6,8 @@ node_modules/
 *.err
 .DS_Store
 data/
+backups/
+awudio-remote.json
+.vercel/
+.agents/
+skills-lock.json
