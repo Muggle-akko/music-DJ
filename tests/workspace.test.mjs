@@ -20,11 +20,11 @@ function harness() {
   };
   const context = {
     queue: [], currentIndex: -1, currentTrack: null, MAX_QUEUE: 200, PLAYLIST_RECOMMENDATION_LIMIT: 30,
-    audio: { pause() {}, removeAttribute() {}, load() {} }, cancelVoicePipeline() {}, syncQueueTabs() {},
+    audio: { paused:true, currentTime:12, addEventListener() {}, pause() {}, removeAttribute() {}, load() {} }, cancelVoicePipeline() {}, syncQueueTabs() {},
     renderCount: 0, notices: [],
     normalizeClientTrack: value => ({ ...value }), isPlayable: value => value.playable && !!value.url,
     syncQueuePageToCurrent() {}, renderQueue() {}, persistQueue() {}, refreshResultActions() {}, closeQueueMenus() {},
-    showNotice(text) { context.notices.push(text); },
+    showNotice(text,action) { context.notices.push(text); context.noticeAction=action; },
     renderCurrentTrack() { context.renderCount++; },
     resolvePlayableIndex: items => items.findIndex(item => item.playable),
     document: { querySelector: node },
@@ -39,7 +39,7 @@ function harness() {
     setBusy(busy, _, scope) { if (busy) context.busyScopes.add(scope); else context.busyScopes.delete(scope); },
   };
   vm.createContext(context);
-  vm.runInContext(['trackKey', 'addPlayableTracks', 'scheduleNextTrack', 'replaceQueueWithTracks', 'loadPlaylistTracks', 'loadUserPlaylists'].map(functionSource).join('\n'), context);
+  vm.runInContext(['trackKey', 'bindTrackRow', 'addPlayableTracks', 'scheduleNextTrack', 'replaceQueueWithTracks', 'loadPlaylistTracks', 'loadUserPlaylists'].map(functionSource).join('\n'), context);
   return context;
 }
 
@@ -102,4 +102,22 @@ test('library batch playback can exceed 30 songs while AI replacement retains it
   assert.equal(h.queue.length, 80); assert.equal(h.currentIndex, 0);
   h.replaceQueueWithTracks(songs);
   assert.equal(h.queue.length, 30);
+});
+
+
+test('queue replacement can restore a paused queue without replacing a later edit',()=>{
+ const h=harness();h.queue=['a','b'].map(track);h.currentIndex=1;h.currentTrack=h.queue[1];
+ h.replaceQueueWithTracks([track('c')]);assert.equal(h.queue[0].id,'c');
+ h.noticeAction.run();assert.equal(h.queue.map(t=>t.id).join(','),'a,b');assert.equal(h.currentTrack.id,'b');assert.equal(h.audio.src,'/stream/b');
+ h.replaceQueueWithTracks([track('c')]);const undo=h.noticeAction;h.addPlayableTracks([track('d')]);undo.run();
+ assert.equal(h.queue.map(t=>t.id).join(','),'c,d');assert.match(h.notices.at(-1),/再次改变/);
+});
+
+test('a detached add-button icon cannot bubble into row playback',()=>{
+ const h=harness();let click,plays=0;
+ const row={dataset:{},classList:{add(){}},addEventListener:(type,fn)=>{click=fn;}};
+ h.bindTrackRow(row,track('a'),()=>{plays++;});
+ const detachedSvg={matches:()=>false},button={matches:selector=>selector.includes('button')};
+ click({composedPath:()=>[detachedSvg,button,row]});assert.equal(plays,0);
+ click({composedPath:()=>[{matches:()=>false},row]});assert.equal(plays,1);
 });

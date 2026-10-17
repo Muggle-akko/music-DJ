@@ -13,7 +13,8 @@ test('browser data cache is account-scoped, expires, and clears on signout',asyn
  cache.useScope('a');await cache.write('/api/radios',{radios:[1]},100);assert.deepEqual(await(await cache.read('/api/radios')).json(),{radios:[1]});
  cache.useScope('b');assert.equal(await cache.read('/api/radios'),null);
  cache.useScope('a');now=100;assert.equal(await cache.read('/api/radios'),null);
- await cache.write('/api/radios',{radios:[2]},100);await cache.clear();cache.useScope('a');assert.equal(await cache.read('/api/radios'),null);
+ await cache.write('/api/radios',{radios:[2]},100);await cache.clear();assert.equal(await cache.read('/api/radios'),null);
+ await cache.write('/api/radios',{radios:[3]},100);assert.deepEqual(await(await cache.read('/api/radios')).json(),{radios:[3]},'clearing keeps the active account scope usable');
  assert.equal(cache.ttl('/api/queue'),0);assert.equal(cache.ttl('/api/instance/agent-connection'),0);assert.equal(cache.ttl('/api/music/stream'),0);
 });
 test('cache bounds and failed browser storage do not block data requests',async()=>{

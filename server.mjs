@@ -22,6 +22,7 @@ import { createDeviceState } from "./lib/device-state.mjs";
 import { createAccess } from "./lib/access.mjs";
 import { buildOwnerBackup } from './lib/backup.mjs';
 import { createInstanceRoutes } from "./lib/instance.mjs";
+import { fetchMusicCover } from "./lib/music-cover.mjs";
 
 const ROOT = resolve(".");
 loadEnvFile(resolve(ROOT, ".env"));
@@ -325,6 +326,18 @@ async function routeApi(req, res, url) {
   }
   if (await agentService.route(req, res, url, readJsonBody)) return;
   if (req.method === 'POST') agentService.guardBrowserMutation(req);
+  if (req.method === 'GET' && url.pathname === '/api/music/cover') {
+    const image = await fetchMusicCover(url.searchParams.get('url') || '');
+    if (!image.body) { sendText(res, image.status, image.message); return; }
+    res.writeHead(200, {
+      'Content-Type': image.contentType,
+      'Content-Length': image.body.length,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.end(image.body);
+    return;
+  }
   if (url.pathname === '/api/radios/studio' && req.method === 'POST') {
     try {
       const body = await readJsonBody(req);

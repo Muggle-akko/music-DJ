@@ -1,11 +1,11 @@
-import { createTrackWaveform } from "/waveform.mjs?v=33";
-import { mobileClient } from "/device-policy.mjs?v=33";
-import { createMobileWorkspace } from "/mobile.mjs?v=33";
-import { createMediaSession } from "/media-session.mjs?v=33";
-import { browserDataCache, apiFetch } from "/network.mjs?v=33";
-import { createListeningController } from "/listening.mjs?v=33";
-import { createAgentController } from "/agent.mjs?v=33";
-import { createRadioStudio } from "/radio.mjs?v=33";
+import { createTrackWaveform } from "/waveform.mjs?v=38";
+import { mobileClient } from "/device-policy.mjs?v=36";
+import { createMobileWorkspace } from "/mobile.mjs?v=36";
+import { createMediaSession } from "/media-session.mjs?v=36";
+import { browserDataCache, apiFetch } from "/network.mjs?v=36";
+import { createListeningController } from "/listening.mjs?v=36";
+import { createAgentController } from "/agent.mjs?v=36";
+import { createRadioStudio } from "/radio.mjs?v=36";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
@@ -99,10 +99,13 @@ const busyScopes = new Set();
 function icon(name, className = "") {
   return `<svg class="ph-icon ${className}" viewBox="0 0 256 256" aria-hidden="true"><use href="/assets/phosphor.svg#${name}"></use></svg>`;
 }
-function showNotice(text) {
+function showNotice(text, action) {
   clearTimeout(noticeTimer);
-  workspaceNotice.textContent = text;
-  noticeTimer = setTimeout(() => { workspaceNotice.textContent = ""; }, 4500);
+  for (const target of [workspaceNotice, document.querySelector('#globalNotice')]) {
+    target.replaceChildren(document.createTextNode(text)); target.hidden=false;
+    if(action){const button=document.createElement('button');button.type='button';button.className='text-action';button.textContent=action.label;button.addEventListener('click',()=>action.run());target.append(button);}
+  }
+  noticeTimer = setTimeout(() => { workspaceNotice.replaceChildren();document.querySelector('#globalNotice').hidden=true; }, action ? 8000:3500);
 }
 
 const MAX_QUEUE = 200;
@@ -210,11 +213,13 @@ let spectrumFallFrame = 0;
 let spectrumLevels = Array.from({ length: SEGMENT_COUNT }, () => 12);
 let spectrumFallVelocity = Array.from({ length: SEGMENT_COUNT }, () => 0);
 
-let mediaControls;
+let mediaControls, mobileWorkspace;
+let narrationEnabled=localStorage.getItem("awudio.narrationEnabled")!=="false";
+const queueViewScroll=new Map();
 init();
 
 async function init() {
-  createMobileWorkspace();
+  mobileWorkspace=createMobileWorkspace({audio,getTrack:()=>currentTrack,renderCover,onPlay:()=>togglePlay(),onNext:()=>playNext(),onLocate:locateCurrentTrack});
   voiceAudio.preload = "auto";
   renderSegments(0);
   resetHostCaptionDisplay();
@@ -256,7 +261,7 @@ async function init() {
 
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("/sw.js?v=33");
+      await navigator.serviceWorker.register("/sw.js?v=36");
     } catch {
       // PWA cache is optional.
     }
@@ -308,7 +313,6 @@ function bindEvents() {
   playPlaylistButton.addEventListener("click", () => {
     replaceQueueWithTracks(playlistTracks, { fullPlaylist: true });
     if (currentIndex >= 0) void playTrack(currentIndex);
-    showNotice("已用歌单替换队列并开始播放");
   });
   addPlaylistButton.addEventListener("click", () => addPlayableTracks(playlistTracks));
   document.querySelector("#muteButton").addEventListener("click", () => {
@@ -331,6 +335,12 @@ function bindEvents() {
   queuePrevPage.addEventListener("click", () => setQueuePage(queuePage - 1));
   queueNextPage.addEventListener("click", () => setQueuePage(queuePage + 1));
   playButton.addEventListener("click", togglePlay);
+  const narrationToggle=document.querySelector('#listenNarration');narrationToggle.checked=narrationEnabled;
+  narrationToggle.addEventListener('change',()=>{narrationEnabled=narrationToggle.checked;localStorage.setItem('awudio.narrationEnabled',String(narrationEnabled));if(!narrationEnabled)cancelVoicePipeline({immediateRestore:true});else scheduleHostIntroVoiceCheck();});
+  document.querySelector('#skipNarration').addEventListener('click',()=>{const intro=getHostIntro(currentTrack);if(intro)spokenVoiceCueKeys.add(getVoiceCueKey(currentTrack,intro));cancelVoicePipeline({immediateRestore:true});showNotice('已跳过本段解说');});
+  document.querySelector('#readNarration').addEventListener('click',()=>{const intro=getHostIntro(currentTrack);if(!intro)return;document.querySelector('#narrationReaderTitle').textContent=currentTrack.title+' · 电台解说';document.querySelector('#narrationReaderText').textContent=intro.displayText;document.querySelector('#narrationReader').showModal();});
+  document.querySelector('#closeNarrationReader').addEventListener('click',()=>document.querySelector('#narrationReader').close());
+  document.addEventListener('error',event=>{const image=event.target;if(!image.matches?.('img.queue-cover'))return;const placeholder=document.createElement('span');placeholder.className='queue-cover queue-cover-placeholder';placeholder.setAttribute('aria-hidden','true');image.replaceWith(placeholder);},true);
   prevButton.addEventListener("click", playPrevious);
   nextButton.addEventListener("click", playNext);
   likeButton.addEventListener("click", () => {
@@ -813,6 +823,7 @@ async function loadPlaylistTracks(playlist, { append = false, force = false } = 
   }
   document.querySelector("#playlistSummary").innerHTML = `${renderCover({ cover: playlist.cover })}<div><h2>${escapeHtml(playlist.name || "未命名歌单")}</h2><p>${Number(playlist.trackCount) || 0} 首 · ${escapeHtml(playlist.creator || "网易云音乐")}</p></div>`;
   setBusy(true, null, "tracks");
+  if(!playlistTracks.length)playlistTracksList.innerHTML='<li class="list-empty" role="status">正在读取歌单…</li>';
   playlistReason.textContent = append ? "正在加载更多歌曲…" : "正在读取歌曲并检查播放权限…";
   try {
     const offset = append ? playlistTrackOffset : 0;
@@ -827,7 +838,7 @@ async function loadPlaylistTracks(playlist, { append = false, force = false } = 
     renderResults(playlistTracksList, playlistTrackCount, playlistTracks, "首已加载");
     document.querySelector("#playlistBatchHint").textContent = `播放全部会替换队列；批量操作包含已加载的 ${count} 首可播歌曲（队列上限 ${MAX_QUEUE} 首）。`;
   } catch (error) {
-    if (version === playlistRequestVersion) playlistReason.textContent = `读取失败：${error.message}。可点击刷新歌单内容重试，已有歌曲已保留。`;
+    if (version === playlistRequestVersion) { playlistReason.textContent = `读取失败：${error.message}。可点击刷新歌单内容重试，已有歌曲已保留。`; if(!playlistTracks.length)playlistTracksList.innerHTML='<li class="list-empty">暂时无法读取，请点击刷新重试</li>'; }
   } finally {
     if (version === playlistRequestVersion) setBusy(false, null, "tracks");
   }
@@ -871,7 +882,6 @@ async function playResultTrack(track) {
     addPlayableTracks([track], { front:true });
     index = queue.findIndex(item => trackKey(item) === trackKey(track));
   }
-  setQueueView("queue");
   await playTrack(index);
 }
 
@@ -893,7 +903,28 @@ function refreshResultActions() {
     button.disabled = exists || button.dataset.blocked === "true";
     const label = exists ? "已在队列" : "加入队列";
     button.title = label; button.setAttribute("aria-label", label);
+    button.classList.toggle('is-added',exists);if(button.dataset.added!==String(exists)){button.innerHTML=icon(exists?'check':'plus');button.dataset.added=String(exists);}
   });
+  document.querySelectorAll('[data-track-key]').forEach(row=>{
+    const current=Boolean(currentTrack && row.dataset.trackKey===trackKey(currentTrack));
+    row.classList.toggle('is-current-track',current);row.classList.toggle('is-audible',current && !audio.paused && audio.readyState>=3);
+    const play=row.querySelector('.track-play');if(current)play?.setAttribute('aria-current','true');else play?.removeAttribute('aria-current');
+  });
+}
+
+function bindTrackRow(row,track,play) {
+  row.dataset.trackKey=trackKey(track);row.classList.add('song-row');
+  row.addEventListener('click',event=>{
+    // A queue update may replace the clicked SVG before this event bubbles.
+    if(event.composedPath().some(node=>node!==row && node.matches?.('button,a,input,textarea,select,summary,.queue-menu')))return;
+    if(isPlayable(track))void play();
+  });
+}
+
+function locateCurrentTrack() {
+  if(!currentTrack)return;
+  mobileWorkspace?.showQueue();setQueueView('queue');
+  requestAnimationFrame(()=>queueList.querySelector('.is-active')?.scrollIntoView({block:'center',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'}));
 }
 
 function replaceQueueWithTracks(tracks, { fullPlaylist = false } = {}) {
@@ -904,6 +935,7 @@ function replaceQueueWithTracks(tracks, { fullPlaylist = false } = {}) {
     return;
   }
 
+  const previous={queue:[...queue],index:currentIndex,time:audio.currentTime,playing:!audio.paused};
   cancelVoicePipeline({ immediateRestore: true });
   audio.pause();
   audio.removeAttribute("src");
@@ -921,7 +953,14 @@ function replaceQueueWithTracks(tracks, { fullPlaylist = false } = {}) {
   renderQueue();
   persistQueue();
   refreshResultActions();
-  showNotice(`已替换队列，共 ${queue.length} 首`);
+  const signature=queue.map(trackKey).join('|');
+  showNotice(`已替换队列，共 ${queue.length} 首`,previous.queue.length ? {label:'撤销',run:()=>{
+    if(queue.map(trackKey).join('|')!==signature){showNotice('队列已再次改变，无法撤销这次替换');return;}
+    cancelVoicePipeline({immediateRestore:true});audio.pause();audio.removeAttribute('src');audio.load();
+    queue=previous.queue;currentIndex=previous.index;currentTrack=queue[currentIndex] || null;renderCurrentTrack();renderQueue();persistQueue();
+    if(currentTrack){const restoredTrack=currentTrack;audio.addEventListener('loadedmetadata',()=>{if(currentTrack===restoredTrack && Number.isFinite(audio.duration))audio.currentTime=Math.min(previous.time || 0,Math.max(0,audio.duration-1));},{once:true});if(previous.playing)void playTrack(currentIndex);else{audio.src=currentTrack.url;audio.load();}}
+    showNotice('已恢复之前的队列');
+  }}:undefined);
 }
 
 async function togglePlay() {
@@ -1348,6 +1387,7 @@ function renderAiChat() {
           <button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!isPlayable(track)}" aria-label="加入队列" title="加入队列" ${isPlayable(track) ? "" : "disabled"}>${icon("queue")}</button>
         `;
 
+        bindTrackRow(card,track,()=>playResultTrack(track));
         card.querySelector(".track-play").addEventListener("click", () => playResultTrack(track));
         card.querySelector("[data-add-track]").addEventListener("click", () => addPlayableTracks([track]));
         if (track.recommendationId) {
@@ -1378,10 +1418,11 @@ function formatChatTime(value) {
 }
 
 function setQueueView(view) {
+  queueViewScroll.set(queueView,queueList.scrollTop);
   queueView = view === "liked" ? "liked" : view === "history" ? "history" : "queue";
   queuePage = 0;
   syncQueueTabs();
-  renderQueue();
+  renderQueue();queueList.scrollTop=queueViewScroll.get(queueView) || 0;
 }
 
 function syncQueueTabs() {
@@ -1461,6 +1502,7 @@ function removeQueueItem(index) {
 }
 
 function renderCurrentTrack() {
+  mobileWorkspace?.update();refreshResultActions();
   mediaControls?.update();
   if (!currentTrack) {
     trackInfo.textContent = "等待推荐或搜索";
@@ -1492,6 +1534,9 @@ function updateLikeButton() {
 }
 
 function updateHostIntroDisplay() {
+  const intro=getHostIntro(currentTrack);
+  document.querySelector('#readNarration').disabled=!intro;
+  document.querySelector('#skipNarration').disabled=!intro || !narrationEnabled || !activeVoiceTask;
   updateLyricsDisplay();
   updateHostCaptionDisplay();
 }
@@ -1608,7 +1653,7 @@ function resetHostCaptionDisplay(text = getHostCaptionIdleText()) {
   clearHostCaptionIdleTimer();
   hostCaption.classList.remove("is-speaking", "is-preparing", "is-dispersing", "has-intro");
   hostCaption.classList.add("is-idle");
-  hostCaption.classList.toggle('is-text-only',Boolean(currentTrack?.hostIntro?.displayText && (currentTrack.hostIntro.provider==='none' || currentTrack.hostIntro.status==='text_only')));
+  hostCaption.classList.toggle('is-text-only',Boolean(currentTrack?.hostIntro?.displayText && (!narrationEnabled || currentTrack.hostIntro.provider==='none' || currentTrack.hostIntro.status==='text_only')));
   hostCaptionState.textContent = "Faye";
   hostCaptionTimer.textContent = "--:--";
   hostCaptionLineKey = "";
@@ -1620,7 +1665,7 @@ function resetHostCaptionDisplay(text = getHostCaptionIdleText()) {
 function getHostCaptionIdleText() {
   if (!currentTrack) return "等待音乐开始";
   if (!getHostIntro(currentTrack)?.displayText) return "本曲暂无解说";
-  if (getHostIntro(currentTrack).provider === 'none' || getHostIntro(currentTrack).status === 'text_only') {
+  if (!narrationEnabled || getHostIntro(currentTrack).provider === 'none' || getHostIntro(currentTrack).status === 'text_only') {
     const intro=getHostIntro(currentTrack),now=Number(audio.currentTime)*1000;
     if(now<intro.startAtMs)return `解说将在 ${formatTime(intro.startAtMs/1000)} 展示`;
     if(intro.windowEndMs && now>intro.windowEndMs)return '本段解说已结束';
@@ -1645,6 +1690,7 @@ function renderHostCaptionIdleText(value) {
 }
 
 function updateHostCaptionDisplay() {
+  document.querySelector('#skipNarration').disabled=!activeVoiceTask || !narrationEnabled;
   if (!hostCaption || !hostCaptionText || !hostCaptionState || !hostCaptionTimer) return;
 
   const task = activeVoiceTask;
@@ -1900,6 +1946,7 @@ function hasHostIntro(track) {
 }
 
 function maybeStartHostIntroVoice() {
+  if (!narrationEnabled)return;
   if (!currentTrack || !audio.currentSrc || audio.paused || audio.ended || activeVoiceTask) return;
 
   const intro = getHostIntro(currentTrack);
@@ -1921,6 +1968,7 @@ function maybeStartHostIntroVoice() {
 
 function scheduleHostIntroVoiceCheck() {
   clearHostIntroVoiceTimer();
+  if (!narrationEnabled)return;
 
   if (!currentTrack || !audio.currentSrc || audio.paused || audio.ended || activeVoiceTask) return;
 
@@ -1953,7 +2001,7 @@ function clearHostIntroVoiceTimer() {
 function handleVisibilityChange() {
   if (document.hidden) trackWaveform.abort();
   if (!document.hidden) {
-    if(mobileClient && !audio.paused)void trackWaveform.load(audio.currentSrc);
+    if(!audio.paused)startSpectrumMeter();
     refreshPlayStateForCurrent();
     mediaControls?.update();
     externalAgentController?.refresh();
@@ -2307,9 +2355,10 @@ function renderTrackTitle(track, fallback = "未命名") {
 }
 
 function renderQueue() {
+  const previousScroll=queueList.scrollTop;
   refreshResultActions();
   document.querySelector("#queueHeading").textContent = queueView === "liked" ? "我喜欢" : queueView === "history" ? "历史电台" : "播放队列";
-  document.querySelector("#queueHint").textContent = queueView === "liked" ? "保存在本应用中的收藏，不会同步网易云红心。" : queueView === "history" ? "载入往期电台会替换当前队列。" : "加入的歌曲按顺序排列，点击封面即可播放。";
+  document.querySelector("#queueHint").textContent = queueView === "liked" ? "保存在本应用中的收藏，不会同步网易云红心。" : queueView === "history" ? "载入往期电台会替换当前队列。" : "加入的歌曲按顺序排列，点击歌曲即可播放。";
   if (queueView === "history") {
     renderRadioHistory();
     return;
@@ -2351,7 +2400,7 @@ function renderQueue() {
       </div>
       <span class="queue-duration">${formatTrackDuration(track.duration)}</span>
       <div class="queue-actions">
-        ${isLiked ? icon("heart-fill", "liked-indicator") : ""}
+        ${queueView==='liked' ? `<button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!isPlayable(track)}" aria-label="加入队列">${icon('plus')}</button>` : isLiked ? icon("heart-fill", "liked-indicator") : ""}
         <button class="menu-button" type="button" data-action="menu" aria-label="更多操作" title="更多操作" aria-expanded="false">
           ${icon("dots-three")}
         </button>
@@ -2365,16 +2414,12 @@ function renderQueue() {
         </div>
       </div>
     `;
+    item.querySelector('[data-add-track]')?.addEventListener('click',()=>addPlayableTracks([track]));
+    bindTrackRow(item,track,()=>queueView === 'liked'?playResultTrack(track):playTrack(index));
     item.querySelector(".track-play").addEventListener("click", () => queueView === "liked" ? playResultTrack(track) : playTrack(index));
     item.querySelector('[data-action="next"]').addEventListener("click", () => scheduleNextTrack(track));
     bindFeedbackMenu(item, track);
-    item.addEventListener("dblclick", () => {
-      if (queueView === "liked") {
-        playLikedTrack(track);
-      } else {
-        playTrack(index);
-      }
-    });
+
     item.querySelector('[data-action="menu"]').addEventListener("click", (event) => {
       event.stopPropagation();
       toggleQueueMenu(item);
@@ -2395,6 +2440,7 @@ function renderQueue() {
     });
     queueList.append(item);
   });
+  queueList.scrollTop=previousScroll;refreshResultActions();
 }
 
 function renderRadioHistory() {
@@ -2465,7 +2511,6 @@ function loadRadioHistoryItem(radio) {
   setPlayMode('list');
   moodValue.textContent = `[心情: ${translateMood(radio.mood || "random")}]`;
   sourceValue.textContent = "[来源: 历史电台]";
-  showNotice(`已载入历史电台，共 ${tracks.length} 首，点击播放开始回听`);
 }
 
 function formatRadioCreatedAt(value) {
@@ -2498,6 +2543,7 @@ function renderResults(listElement, countElement, tracks, unit = "首") {
       <div class="queue-actions"><button class="mini-action icon-action" type="button" data-add-track="${escapeHtml(trackKey(track))}" data-blocked="${!playable}" aria-label="加入队列" title="加入队列" ${playable ? "" : "disabled"}>${icon("queue")}</button>
       <button class="menu-button" type="button" aria-label="更多操作" title="更多操作" aria-expanded="false" ${playable ? "" : "disabled"}>${icon("dots-three")}</button>
       <div class="queue-menu" hidden><button type="button" data-action="next">下一首播放</button>${showFeedback ? '<button type="button" data-action="not-now">现在不合适</button><button type="button" data-action="dislike">不喜欢</button><button type="button" data-action="explain">为什么推荐</button>' : ''}</div></div>`;
+    bindTrackRow(item,track,()=>playResultTrack(track));
     item.querySelector(".track-play").addEventListener("click", () => playResultTrack(track));
     item.querySelector("[data-add-track]").addEventListener("click", () => addPlayableTracks([track]));
     item.querySelector(".menu-button").addEventListener("click", event => { event.stopPropagation(); toggleQueueMenu(item); });
@@ -2598,16 +2644,17 @@ function renderSegments(ratio) {
 }
 
 function startSpectrumMeter() {
-  if(mobileClient && !document.hidden && audio.currentSrc)void trackWaveform.load(audio.currentSrc);
-  if (!progressSegments || spectrumFrame) return;
+  if (!progressSegments) return;
+  ensureSpectrumAnalyser();
+  if((mobileClient || !spectrumAnalyser) && !document.hidden && audio.currentSrc)void trackWaveform.load(audio.currentSrc);
+  void spectrumAudioContext?.resume?.().catch(() => {});
+  if (spectrumFrame) return;
   if (spectrumFallFrame) {
     window.cancelAnimationFrame(spectrumFallFrame);
     spectrumFallFrame = 0;
   }
   progressSegments.classList.remove("is-meter-calm");
   progressSegments.classList.add("is-meter-live");
-  ensureSpectrumAnalyser();
-  void spectrumAudioContext?.resume?.().catch(() => {});
   const render = () => {
     updateSpectrumBars();
     spectrumFrame = window.requestAnimationFrame(render);
@@ -2816,6 +2863,7 @@ function applyMusicVolume() {
 }
 
 function setPlayState(text, isPlaying) {
+  mobileWorkspace?.update();refreshResultActions();
   playState.textContent = normalizePlayStateLabel(text, isPlaying);
   playState.classList.toggle("is-playing", Boolean(isPlaying));
 }
@@ -3348,7 +3396,20 @@ function renderCover(track) {
     return '<div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div>';
   }
 
-  return `<img class="queue-cover" src="${escapeHtml(track.cover)}" alt="" loading="lazy">`;
+  return `<img class="queue-cover" src="${escapeHtml(cachedCoverUrl(track.cover))}" alt="" loading="lazy" decoding="async">`;
+}
+
+function cachedCoverUrl(value) {
+  const raw = String(value || '');
+  try {
+    const url = new URL(raw, location.origin);
+    if (url.origin === location.origin || !/^p\d+\.music\.126\.net$/i.test(url.hostname)) return raw;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return raw;
+    url.protocol = 'https:';
+    return `/api/music/cover?url=${encodeURIComponent(url.href)}`;
+  } catch {
+    return raw;
+  }
 }
 
 function setPlayIcon(isPlay) {

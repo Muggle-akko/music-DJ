@@ -1,4 +1,4 @@
-import { apiFetch } from '/network.mjs?v=33';
+import { apiFetch, clearLocalCaches } from '/network.mjs?v=36';
 const el = id => document.getElementById(id);
 let qrTimer, qrGeneration = 0;
 async function request(path, body) {
@@ -58,6 +58,10 @@ el('downloadBridge')?.addEventListener('click', event => void busy(event.current
 }));
 el('deviceName').value = localStorage.getItem('awudio.deviceName') || '';
 el('saveDevice').addEventListener('click', () => { localStorage.setItem('awudio.deviceName',el('deviceName').value.trim()); el('settingsStatus').textContent = '设备名称已保存。'; });
+el('clearCache')?.addEventListener('click', event => void busy(event.currentTarget, async () => {
+  await clearLocalCaches();
+  el('settingsStatus').textContent = '本机缓存已清除；云端电台、网易云登录和设备资料不受影响。';
+}));
 el('signout').addEventListener('click', event => void busy(event.currentTarget, async () => { await request('/api/access/logout', {}); location.replace('/signin'); }));
 document.getElementById('mobileSettings')?.addEventListener('close', () => { qrGeneration++; clearTimeout(qrTimer); el('cookie').value=''; el('qrPanel').hidden=true; });
 window.addEventListener('awudio:settings-open',()=>{void refresh().catch(error=>{el('settingsStatus').textContent=error.message;});});

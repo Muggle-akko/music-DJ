@@ -1,7 +1,7 @@
-import { syncDelay } from '/sync-policy.mjs?v=33';
-import { browserDataCache } from '/network.mjs?v=33';
-import { mobileClient } from "/device-policy.mjs?v=33";
-import { apiFetch } from "/network.mjs?v=33";
+import { syncDelay } from '/sync-policy.mjs?v=36';
+import { browserDataCache } from '/network.mjs?v=36';
+import { mobileClient } from "/device-policy.mjs?v=36";
+import { apiFetch } from "/network.mjs?v=36";
 // External Agent integration. The browser owns audio; the server owns durable plans and commands.
 export function createAgentController(adapter) {
   let token, playerId, mode = 'builtin', lastSnapshot, initializing, refreshing, repeat = false;
@@ -108,7 +108,7 @@ export function createAgentController(adapter) {
     node('builtinRecommendation').hidden = playbackOnly() || mode === 'external';
     const active = snapshot.agents || [];
     const selected = snapshot.players.find(p => p.selected);
-    status(active.length ? `${active.map(a => a.name).join('、')} 已连接` : '尚未连接 Agent');
+    status(active.length ? 'Agent 已连接' : 'Agent 待命');
     node('agentConnectionState').dataset.state = active.length ? 'ready' : 'waiting';
     const select = node('agentPlayerSelect'), previous = select.value;
     const onlinePlayers = snapshot.players.filter(p => p.online);
@@ -126,20 +126,20 @@ export function createAgentController(adapter) {
     else { select.value = selected?.playerId || playerId; deviceChoiceDirty = false; }
     const selectedOptionIsTarget = select.value === selected?.playerId;
     node('agentSelectPlayerButton').disabled = selectedOptionIsTarget || !select.value;
-    node('agentSelectPlayerButton').textContent = selectedOptionIsTarget ? '已选择' : '设为播放页面';
+    node('agentSelectPlayerButton').textContent = selectedOptionIsTarget ? '已选择' : '让 Agent 控制此页面';
     node('agentDeviceControls').hidden = onlinePlayers.length === 1 && Boolean(selected);
-    node('agentDeviceSummary').textContent = selected ? `${playerName(selected)}接收播放控制` : '选择一个页面来接收播放控制';
+    node('agentDeviceSummary').textContent = selected ? `Agent 控制：${playerName(selected)}` : '选择 Agent 控制的页面；推荐结果会同步到所有设备';
     const latest = snapshot.operations[0];
     const labels = { accepted: '等待播放器执行', delivered: '已送达，等待播放回执', pending_feedback: '正在保存反馈', applied: '已完成', needs_user_gesture: '请点击开始播放', failed: '执行失败', expired: '操作已过期', uncertain: '执行结果不确定，请核对播放器' };
-    const recent = latest && (latest.status !== 'applied' || Date.now() - Date.parse(latest.updatedAt) < 8000);
+    const recent = latest && (latest.status === 'needs_user_gesture' || Date.now()-Date.parse(latest.updatedAt)<(['applied','expired'].includes(latest.status)?8000:60000));
     node('agentOperationPanel').hidden = !recent;
     node('agentOperationPanel').dataset.state = latest?.status || '';
     node('agentOperationStatus').textContent = latest ? `${latest.receipt?.outcome === 'playing' ? '已开始播放' : labels[latest.status] || '处理中'}${latest.receipt?.message ? ` · ${latest.receipt.message}` : ''}` : '';
     node('agentResumeButton').hidden = latest?.status !== 'needs_user_gesture';
     const empty = !snapshot.plans.length;
     node('agentEmptyState').hidden = !empty; node('agentPlans').hidden = empty;
-    node('agentEmptyTitle').textContent = active.length ? '等待你的下一段音乐' : '连接你的音乐助手';
-    node('agentEmptyDescription').textContent = active.length ? '告诉 Agent 想听什么，选好的歌会出现在这里。' : '在 Codex 里聊想听的音乐，选好的歌会同步到这里。';
+    node('agentEmptyTitle').textContent = active.length ? '等待你的下一段音乐' : '下一段音乐，从对话开始';
+    node('agentEmptyDescription').textContent = active.length ? '告诉 Agent 想听什么，选好的歌会出现在这里。' : '需要新推荐时，在电脑上打开 Agent。已有的歌单和电台随时可听。';
     const key = JSON.stringify(snapshot.plans.map(p => [p.id, p.createdAt]));
     if (renderKey !== key) { renderKey = key; adapter.renderPlans(snapshot.plans, applyPlan); }
   }
@@ -213,7 +213,7 @@ export function createAgentController(adapter) {
     deviceChoiceDirty = true;
     const selected = lastSnapshot?.players.find(p => p.selected);
     node('agentSelectPlayerButton').disabled = node('agentPlayerSelect').value === selected?.playerId;
-    node('agentSelectPlayerButton').textContent = node('agentSelectPlayerButton').disabled ? '已选择' : '设为播放页面';
+    node('agentSelectPlayerButton').textContent = node('agentSelectPlayerButton').disabled ? '已选择' : '让 Agent 控制此页面';
   });
   node('agentSelectPlayerButton').addEventListener('click', async () => {
     try { await api('select', { playerId: node('agentPlayerSelect').value }); deviceChoiceDirty = false; await refresh(); }

@@ -1,11 +1,20 @@
-import { createDataCache } from '/data-cache.mjs?v=33';
-import { mobileClient } from "/device-policy.mjs?v=33";
+import { createDataCache } from '/data-cache.mjs?v=36';
+import { mobileClient } from "/device-policy.mjs?v=36";
 let deviceId = localStorage.getItem('awudio.deviceId');
 if (!/^[a-f0-9-]{16,64}$/.test(deviceId || '')) {
   deviceId = crypto.randomUUID(); localStorage.setItem('awudio.deviceId', deviceId);
 }
 export { deviceId };
 export const browserDataCache=createDataCache();
+export async function clearLocalCaches() {
+  await browserDataCache.clear();
+  if (!globalThis.caches) return;
+  try {
+    for (const name of await caches.keys()) {
+      if (name.startsWith('awudio-workspace-') || name === 'awudio-covers-v1') await caches.delete(name);
+    }
+  } catch { /* Storage may be unavailable in private browsing mode. */ }
+}
 export async function apiFetch(input, init = {}) {
   if (new URL(input, location.href).origin !== location.origin) return fetch(input, init);
   const method=init.method || 'GET',ttl=method==='GET' ? browserDataCache.ttl(input) : 0;

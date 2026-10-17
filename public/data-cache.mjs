@@ -27,6 +27,6 @@ export function createDataCache({storage=globalThis.caches,now=Date.now,origin=g
     }catch{/* Private mode/storage pressure must not block listening. */}
   }
   async function remove(path){if(!name || !storage)return;try{const cache=await storage.open(name);await cache.delete(key(path));}catch{}}
-  async function clear(){name=null;if(!storage)return;try{for(const key of await storage.keys())if(key.startsWith(PREFIX))await storage.delete(key);}catch{}}
+  async function clear(){if(!storage)return;try{for(const key of await storage.keys())if(key.startsWith(PREFIX))await storage.delete(key);}catch{}}
   return {useScope,read,write,remove,clear,ttl:path=>TTL.get(new URL(path,origin).pathname)||0};
 }

@@ -1,4 +1,6 @@
-const CACHE_NAME = "awudio-workspace-v34";
+const CACHE_NAME = "awudio-workspace-v37";
+const COVER_CACHE_NAME = "awudio-covers-v1";
+const MAX_COVER_ENTRIES = 240;
 const STATIC_ASSETS = [
   "/styles.css",
   "/app.js",
@@ -46,7 +48,13 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  if (url.origin !== self.location.origin || event.request.method !== "GET" || !STATIC_ASSETS.includes(url.pathname)) return;
+  if (url.origin !== self.location.origin || event.request.method !== "GET") return;
+
+  if (url.pathname === "/api/music/cover") {
+    event.respondWith(cacheCover(event.request));
+    return;
+  }
+  if (!STATIC_ASSETS.includes(url.pathname)) return;
 
   event.respondWith(
     fetch(event.request)
@@ -60,3 +68,25 @@ self.addEventListener("fetch", (event) => {
       .catch(() => caches.match(event.request)),
   );
 });
+
+async function cacheCover(request) {
+  let cache;
+  try {
+    cache = await caches.open(COVER_CACHE_NAME);
+    const cached = await cache.match(request);
+    if (cached) return cached;
+  } catch {
+    return fetch(request);
+  }
+
+  const response = await fetch(request, { cache: "no-store" });
+  if (!response.ok || !response.headers.get("Content-Type")?.toLowerCase().startsWith("image/")) return response;
+  try {
+    await cache.put(request, response.clone());
+    const keys = await cache.keys();
+    while (keys.length > MAX_COVER_ENTRIES) await cache.delete(keys.shift());
+  } catch {
+    // Quota/private-mode failures must not block cover loading.
+  }
+  return response;
+}
