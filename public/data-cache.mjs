@@ -1,5 +1,5 @@
 const PREFIX='awudio-data-v1-';
-const TTL=new Map([['/api/radios',120000],['/api/music/playlists',300000],['/api/music/playlist-tracks',300000],['/api/music/search',60000]]);
+const TTL=new Map([['/api/music/lyric',86400000],['/api/radios',120000],['/api/music/playlists',300000],['/api/music/playlist-tracks',300000],['/api/music/search',60000]]);
 export function createDataCache({storage=globalThis.caches,now=Date.now,origin=globalThis.location?.origin,maxEntries=40,maxBytes=4*1024*1024}={}) {
   let name=null;
   const key=value=>new URL(value,origin).href;

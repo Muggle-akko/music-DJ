@@ -22,6 +22,7 @@ import { createDeviceState } from "./lib/device-state.mjs";
 import { createAccess } from "./lib/access.mjs";
 import { buildOwnerBackup } from './lib/backup.mjs';
 import { createInstanceRoutes } from "./lib/instance.mjs";
+import { createMusicReadCache, isIndependentMusicRead } from "./lib/music-read.mjs";
 import { fetchMusicCover } from "./lib/music-cover.mjs";
 
 const ROOT = resolve(".");
@@ -254,11 +255,35 @@ const instanceRoute = createInstanceRoutes({ ncmBase:NCM_API_BASE, connectAccoun
     state:JSON.parse(await readDataFile(STATE_FILE,'utf8')),readJson:path=>readJson(resolve(DATA_DIR,path))}) });
 const runtimeFile=resolve(DATA_DIR,'cloud-runtime.json');
 const lookupFile=resolve(DATA_DIR,'agent-lookups.json');
+const musicReadCache=createMusicReadCache();
+async function serveMusicRead(req,res,url) {
+  if(url.pathname==='/api/music/cover') {
+    const raw=url.searchParams.get('url') || '';
+    const image=await musicReadCache(`cover:${raw}`,()=>fetchMusicCover(raw));
+    if(!image.body){sendText(res,image.status,image.message);return;}
+    res.writeHead(200,{'Content-Type':image.contentType,'Content-Length':image.body.length,
+      'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'});
+    res.end(image.body);return;
+  }
+  const id=url.searchParams.get('id') || '';
+  if(!/^\d{1,20}$/.test(id)){sendJson(res,400,{ok:false,error:'无效的歌曲编号'});return;}
+  // Read credentials for this request without modifying shared account/runtime state.
+  const saved=await readJson(connectionFile,{});
+  const cookie=saved.cookie || process.env.NCM_COOKIE || '';
+  const scope=createHash('sha256').update(cookie).digest('hex');
+  const lyric=await musicReadCache(`lyric:${scope}:${id}`,async()=>{
+    if(!NCM_API_BASE)throw Object.assign(new Error('网易云未配置'),{httpStatus:503});
+    const data=await ncmFetch('/lyric',{id},{cookie});
+    return {status:200,body:String(data?.lrc?.lyric || '')};
+  });
+  sendJson(res,200,{ok:true,id,lyric:lyric.body});
+}
 const handler=async (req,res)=>{
   try {
     const url = new URL(req.url || "/", "http://localhost");
     if (req.method === 'GET' && url.pathname === '/healthz') { sendJson(res, 200, {ok:true}); return; }
     if (await access.route(req, res, url, readJsonBody)) return;
+    if(isIndependentMusicRead(req)){await serveMusicRead(req,res,url);return;}
     if(dataStoreEnabled() && url.pathname==='/api/player/events') {res.writeHead(204);res.end();return;}
     if (await instanceRoute(req, res, url, readJsonBody)) return;
     if (url.pathname === '/signin') { await serveStatic(res, '/signin.html'); return; }
@@ -326,18 +351,6 @@ async function routeApi(req, res, url) {
   }
   if (await agentService.route(req, res, url, readJsonBody)) return;
   if (req.method === 'POST') agentService.guardBrowserMutation(req);
-  if (req.method === 'GET' && url.pathname === '/api/music/cover') {
-    const image = await fetchMusicCover(url.searchParams.get('url') || '');
-    if (!image.body) { sendText(res, image.status, image.message); return; }
-    res.writeHead(200, {
-      'Content-Type': image.contentType,
-      'Content-Length': image.body.length,
-      'Cache-Control': 'private, no-store',
-      'X-Content-Type-Options': 'nosniff',
-    });
-    res.end(image.body);
-    return;
-  }
   if (url.pathname === '/api/radios/studio' && req.method === 'POST') {
     try {
       const body = await readJsonBody(req);
@@ -500,13 +513,6 @@ async function routeApi(req, res, url) {
     const limit = clampNumber(url.searchParams.get("limit"), NCM_PLAYLIST_SEARCH_LIMIT, 1, 20);
     const playlists = await searchNcmPlaylists(query, limit);
     sendJson(res, 200, { ok: true, query, playlists, limit });
-    return;
-  }
-
-  if (req.method === "GET" && url.pathname === "/api/music/lyric") {
-    const id = url.searchParams.get("id") || "";
-    const lyric = await getLyric(id);
-    sendJson(res, 200, { ok: true, id, lyric });
     return;
   }
 
@@ -1745,19 +1751,7 @@ async function getPlaylistTracks(id, limit, offset) {
   return enrichNcmTracks(data?.songs || []);
 }
 
-async function getLyric(id) {
-  if (!id || !NCM_API_BASE) return "";
-
-  try {
-    const data = await ncmFetch("/lyric", { id, timestamp: Date.now() });
-    return data?.lrc?.lyric || "";
-  } catch (error) {
-    console.warn("Netease lyric failed:", error.message);
-    return "";
-  }
-}
-
-async function ncmFetch(path, params = {}) {
+async function ncmFetch(path, params = {}, {cookie=NCM_COOKIE} = {}) {
   const url = new URL(path, NCM_API_BASE);
 
   for (const [key, value] of Object.entries(params)) {
@@ -1771,7 +1765,7 @@ async function ncmFetch(path, params = {}) {
     "User-Agent": "Awudio-MVP/0.1",
   };
 
-  if (NCM_COOKIE) headers.Cookie = NCM_COOKIE;
+  if (cookie) headers.Cookie = cookie;
 
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   const data = await response.json();

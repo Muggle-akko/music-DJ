@@ -92,7 +92,7 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   document.addEventListener('visibilitychange',()=>{if(document.hidden&&flipAnimation)showFace(targetFace);});
   el('mobileSettingsOpen').addEventListener('click',async()=>{
     sheet.showModal();
-    if(!settingsLoaded){settingsLoaded=true;try{await import('/settings.mjs');}catch{settingsLoaded=false;el('settingsStatus').textContent='设置加载失败，请重新打开';}}
+    if(!settingsLoaded){settingsLoaded=true;try{await import('/settings.mjs?v=44');}catch{settingsLoaded=false;el('settingsStatus').textContent='设置加载失败，请重新打开';}}
     else window.dispatchEvent(new Event('awudio:settings-open'));
   });
   el('mobileSettingsClose').addEventListener('click',()=>sheet.close());

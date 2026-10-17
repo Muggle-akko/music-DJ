@@ -1,7 +1,7 @@
 import { syncDelay } from '/sync-policy.mjs?v=36';
-import { browserDataCache } from '/network.mjs?v=36';
+import { browserDataCache } from '/network.mjs?v=44';
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { apiFetch } from "/network.mjs?v=36";
+import { apiFetch } from "/network.mjs?v=44";
 // External Agent integration. The browser owns audio; the server owns durable plans and commands.
 export function createAgentController(adapter) {
   let token, playerId, mode = 'builtin', lastSnapshot, initializing, refreshing, repeat = false;

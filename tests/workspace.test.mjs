@@ -121,3 +121,35 @@ test('a detached add-button icon cannot bubble into row playback',()=>{
  click({composedPath:()=>[detachedSvg,button,row]});assert.equal(plays,0);
  click({composedPath:()=>[{matches:()=>false},row]});assert.equal(plays,1);
 });
+
+function lyricHarness(getJson) {
+  const h={currentTrack:track('1'),trackKey:t=>t.id,lyricRequestToken:0,currentLyricTrackKey:'',lyricCache:new Map(),
+    lyricAbortController:null,lyricLoading:false,currentLyrics:[],getJson,AbortController,AbortSignal,
+    setTimeout:fn=>setTimeout(fn,0),clearTimeout,parseLrc:text=>text?[text]:[],resetLyricsDisplay:text=>{h.message=text;},updateLyricsDisplay(){}};
+  vm.createContext(h);vm.runInContext(functionSource('loadCurrentLyrics'),h);return h;
+}
+test('temporary lyric failure retries and only successful results are cached',async()=>{
+  let calls=0;
+  const h=lyricHarness(async()=>{if(++calls<3)throw new Error('temporary');return {lyric:'recovered'};});
+  await h.loadCurrentLyrics();assert.equal(calls,3);assert.equal(h.currentLyrics[0],'recovered');assert.equal(h.lyricCache.has('1'),true);
+  const failed=lyricHarness(async()=>{throw new Error('offline');});await failed.loadCurrentLyrics();
+  assert.equal(failed.lyricCache.has('1'),false);assert.match(failed.message,/加载失败/);
+  failed.getJson=async()=>({lyric:'online again'});await failed.loadCurrentLyrics();assert.equal(failed.currentLyrics[0],'online again');
+});
+test('changing tracks cancels the previous lyric request and rejects its late response',async()=>{
+  let release,signal;
+  const h=lyricHarness(async(url,options)=>{signal=options.signal;return new Promise(resolve=>{release=resolve;});});
+  const old=h.loadCurrentLyrics();h.currentTrack=track('2');h.getJson=async()=>({lyric:'new song'});
+  await h.loadCurrentLyrics();assert.equal(signal.aborted,true);release({lyric:'old song'});await old;
+  assert.equal(h.currentLyrics[0],'new song');assert.equal(h.lyricCache.has('1'),false);
+});
+test('cover failures retry twice without replacing the image or retrying detached nodes',()=>{
+  const jobs=[],image={matches:()=>true,dataset:{},style:{},src:'https://radio.example/api/music/cover?url=x',isConnected:true};
+  const h={URL,location:{origin:'https://radio.example'},setTimeout:fn=>jobs.push(fn)};
+  vm.createContext(h);vm.runInContext(functionSource('retryCover'),h);
+  h.retryCover(image);h.retryCover(image);assert.equal(jobs.length,1);jobs.shift()();assert.match(image.src,/coverRetry=1/);
+  h.retryCover(image);jobs.shift()();assert.match(image.src,/coverRetry=2/);
+  h.retryCover(image);assert.equal(jobs.length,0);
+  const detached={...image,dataset:{},style:{},isConnected:false};const src=detached.src;
+  h.retryCover(detached);jobs.shift()();assert.equal(detached.src,src);
+});

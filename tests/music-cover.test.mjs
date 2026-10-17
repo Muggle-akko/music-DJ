@@ -26,3 +26,12 @@ test('cover proxy rejects non-image and oversized upstream responses', async () 
   });
   assert.equal(large.status, 413);
 });
+
+
+test('NetEase JPEG images labelled image/jpg are accepted and served as image/jpeg', async () => {
+  const image=await fetchMusicCover('https://p2.music.126.net/cover.jpg', {
+    fetchImpl:async()=>new Response(new Uint8Array([255,216,255,224]),{headers:{'Content-Type':'image/jpg'}}),
+  });
+  assert.equal(image.status,200);assert.equal(image.contentType,'image/jpeg');
+  assert.deepEqual([...image.body],[255,216,255,224]);
+});

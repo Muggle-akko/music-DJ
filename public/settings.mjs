@@ -1,4 +1,4 @@
-import { apiFetch, clearLocalCaches } from '/network.mjs?v=36';
+import { apiFetch, clearLocalCaches } from '/network.mjs?v=44';
 const el = id => document.getElementById(id);
 let qrTimer, qrGeneration = 0;
 async function request(path, body) {

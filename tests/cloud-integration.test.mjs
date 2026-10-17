@@ -123,6 +123,21 @@ test('Postgres cloud: two instances, cold restart, actor state, binary media and
     assert.equal((await request(a.port,`/api/tts/audio/${audioName}`,{auth:false})).status,401);
     const audio=await request(b.port,`/api/music/stream?id=${winner}&full=1`,{headers:{Range:'bytes=0-3'}});
     assert.equal(audio.status,206);assert.equal(audio.data,'song');
+    // Even while the metadata writer is locked, authenticated asset reads must finish.
+    const blocker=await db.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext('awudio-metadata-v1'))");
+      const assets=await Promise.race([
+        Promise.all([
+          request(a.port,'/api/music/lyric?id=123'),
+          request(a.port,'/api/music/cover?url=https://example.com/blocked'),
+          request(a.port,'/api/music/lyric?id=123',{auth:false}),
+        ]),
+        sleep(3000).then(()=>{throw new Error('music reads waited for the metadata lock');}),
+      ]);
+      assert.deepEqual(assets.map(result=>result.status),[200,400,401]);
+    } finally {await blocker.query('ROLLBACK');blocker.release();}
     // A failed COMMIT path must not leak an already-buffered 200 save response.
     await db.query("CREATE FUNCTION awudio_fail_runtime() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.path='cloud-runtime.json' THEN RAISE EXCEPTION 'fixture write failure'; END IF; RETURN NEW; END $$");
     await db.query('CREATE TRIGGER awudio_fail_runtime BEFORE INSERT OR UPDATE ON awudio_objects FOR EACH ROW EXECUTE FUNCTION awudio_fail_runtime()');

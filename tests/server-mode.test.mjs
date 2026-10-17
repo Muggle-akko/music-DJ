@@ -36,7 +36,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function listen(server) { server.listen(0,'127.0.0.1');await once(server,'listening');return server.address().port; }
 
 test('server HTTP: private media, owner login, device queues, remote Agent scope and restart persistence', async () => {
-  let upstreamBase, mediaCalls=0, loginAvailable=true;
+  let upstreamBase, mediaCalls=0, loginAvailable=true, lyricCalls=0;
   const upstream=createServer((req,res)=>{
     const url=new URL(req.url,'http://fixture');
     let data={code:200};
@@ -52,7 +52,7 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
     } else if(url.pathname==='/login/qr/key') data={code:200,data:{unikey:'fixture-key'}};
     else if(url.pathname==='/login/qr/create') data={code:200,data:{qrimg:'data:image/png;base64,dGVzdA=='}};
     else if(url.pathname==='/login/qr/check') data={code:803,cookie:'MUSIC_U=valid'};
-    else if(url.pathname==='/lyric') data={code:200,lrc:{lyric:''}};
+    else if(url.pathname==='/lyric') {lyricCalls++;data=lyricCalls===1 ? {code:500,message:'temporary lyric failure'} : {code:200,lrc:{lyric:'[00:01.00]Recovered lyric'}};}
     else if(url.pathname==='/user/playlist') data={code:200,playlist:[],more:false};
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(data));
   });
@@ -82,7 +82,7 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
   async function stop() { if(child.exitCode===null){child.kill('SIGTERM');await once(child,'exit');} }
   try {
     await start();
-    for(const path of ['/api/queue','/api/radios','/api/config','/api/music/stream?id=1','/api/tts/audio/fixture.mp3','/api/instance']) {
+    for(const path of ['/api/music/lyric?id=1','/api/music/cover?url=https%3A%2F%2Fp1.music.126.net%2Fcover.jpg','/api/queue','/api/radios','/api/config','/api/music/stream?id=1','/api/tts/audio/fixture.mp3','/api/instance']) {
       assert.equal((await request(path,{auth:false})).status,401,path);
     }
     assert.equal(mediaCalls,0);
@@ -95,6 +95,13 @@ test('server HTTP: private media, owner login, device queues, remote Agent scope
     assert.match(setCookie,/HttpOnly/);assert.match(setCookie,/Secure/);assert.match(setCookie,/SameSite=Strict/);cookie=setCookie.split(';')[0];
     assert.equal((await request('/api/instance/cookie',{body:{cookie:'MUSIC_U=valid'}})).status,200);
     assert.equal((await request('/api/instance')).data.authenticated,true);
+    assert.equal((await request('/api/music/lyric?id=1')).status,500,'upstream failure must not look like a song without lyrics');
+    const recovered=await request('/api/music/lyric?id=1');
+    assert.equal(recovered.status,200);assert.match(recovered.data.lyric,/Recovered lyric/);
+    await request('/api/music/lyric?id=1');assert.equal(lyricCalls,2,'successful lyrics reuse the server cache');
+    assert.equal((await request('/api/music/lyric?id=bad')).status,400);
+    assert.equal((await request('/api/music/cover?url=https://example.com/cover.jpg')).status,400);
+
     assert.equal((await request('/api/instance/cookie',{body:{cookie:'MUSIC_U=valid-other'}})).status,400);
     assert.equal((await request('/api/instance')).data.account.userId,'123');
     assert.equal((await stat(join(dir,'netease-connection.json'))).mode&0o777,0o600);

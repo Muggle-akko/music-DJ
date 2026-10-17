@@ -1,4 +1,4 @@
-import { createDataCache } from '/data-cache.mjs?v=36';
+import { createDataCache } from '/data-cache.mjs?v=44';
 import { mobileClient } from "/device-policy.mjs?v=36";
 let deviceId = localStorage.getItem('awudio.deviceId');
 if (!/^[a-f0-9-]{16,64}$/.test(deviceId || '')) {

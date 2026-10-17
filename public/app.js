@@ -1,11 +1,11 @@
 import { createTrackWaveform } from "/waveform.mjs?v=38";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=43";
+import { createMobileWorkspace } from "/mobile.mjs?v=44";
 import { createMediaSession } from "/media-session.mjs?v=36";
-import { browserDataCache, apiFetch } from "/network.mjs?v=36";
+import { browserDataCache, apiFetch } from "/network.mjs?v=44";
 import { createListeningController } from "/listening.mjs?v=36";
-import { createAgentController } from "/agent.mjs?v=36";
-import { createRadioStudio } from "/radio.mjs?v=36";
+import { createAgentController } from "/agent.mjs?v=44";
+import { createRadioStudio } from "/radio.mjs?v=44";
 
 const audio = document.querySelector("#audio");
 const voiceAudio = new Audio();
@@ -197,6 +197,7 @@ let lyricCache = new Map();
 let currentLyrics = [];
 let currentLyricTrackKey = "";
 let lyricRequestToken = 0;
+let lyricAbortController = null;
 let lyricLoading = false;
 let lastLyricRenderKey = "";
 let hostCaptionLineKey = "";
@@ -232,7 +233,7 @@ async function init() {
   bindEvents();
   setPlayMode(playMode);
   setVolume(volume, { save: false });
-  await loadConfig();
+  const configReady=loadConfig().catch(()=>{brainStatus.textContent='[配置暂不可用]';});
   await loadNeteaseAccount();
   scopeBrowserStorage(accountUserId || 'guest');
   browserDataCache.useScope(accountUserId || 'guest');
@@ -241,8 +242,9 @@ async function init() {
   aiChatMessages = loadAiChatMessages();
   renderAiChat();
   await restoreQueue();
-  await restoreLikedTracks();
-  await loadRadioHistory({ silent: true });
+  void restoreLikedTracks().then(()=>{renderQueue();updateLikeButton();});
+  void loadRadioHistory({ silent: true });
+  await configReady;
   if (accountUserId) listeningController = createListeningController({ audio, getTrack: () => currentTrack, post: postJson, accountId: accountUserId, clientId: eventClientId });
   localStorage.removeItem('awudio.recommenderVersion');
   radioStudio = createRadioStudio({flushQueue:flushQueueWrites,getRevision:()=>serverQueueRevision,notice:showNotice,
@@ -261,7 +263,7 @@ async function init() {
 
   if ("serviceWorker" in navigator) {
     try {
-      await navigator.serviceWorker.register("/sw.js?v=43");
+      await navigator.serviceWorker.register("/sw.js?v=44");
     } catch {
       // PWA cache is optional.
     }
@@ -340,7 +342,12 @@ function bindEvents() {
   document.querySelector('#skipNarration').addEventListener('click',()=>{const intro=getHostIntro(currentTrack);if(intro)spokenVoiceCueKeys.add(getVoiceCueKey(currentTrack,intro));cancelVoicePipeline({immediateRestore:true});showNotice('已跳过本段解说');});
   document.querySelector('#readNarration').addEventListener('click',()=>{const intro=getHostIntro(currentTrack);if(!intro)return;document.querySelector('#narrationReaderTitle').textContent=currentTrack.title+' · 电台解说';document.querySelector('#narrationReaderText').textContent=intro.displayText;document.querySelector('#narrationReader').showModal();});
   document.querySelector('#closeNarrationReader').addEventListener('click',()=>document.querySelector('#narrationReader').close());
-  document.addEventListener('error',event=>{const image=event.target;if(!image.matches?.('img.queue-cover'))return;const placeholder=document.createElement('span');placeholder.className='queue-cover queue-cover-placeholder';placeholder.setAttribute('aria-hidden','true');image.replaceWith(placeholder);},true);
+  document.addEventListener('error',event=>retryCover(event.target),true);
+  document.addEventListener('load',event=>{const image=event.target;if(image.matches?.('img.queue-cover')){image.style.opacity='';delete image.dataset.coverFailed;}},true);
+  window.addEventListener('online',()=>{
+    document.querySelectorAll('img[data-cover-failed]').forEach(image=>{image.dataset.coverRetries='0';retryCover(image);});
+    if(currentTrack && !lyricLoading && !lyricCache.has(trackKey(currentTrack)))void loadCurrentLyrics();
+  });
   prevButton.addEventListener("click", playPrevious);
   nextButton.addEventListener("click", playNext);
   likeButton.addEventListener("click", () => {
@@ -1556,6 +1563,7 @@ function resetLyricsDisplay(text = "暂无歌词") {
 }
 
 async function loadCurrentLyrics() {
+  lyricAbortController?.abort();
   const track = currentTrack;
   const key = trackKey(track);
   const token = ++lyricRequestToken;
@@ -1578,20 +1586,28 @@ async function loadCurrentLyrics() {
     return;
   }
 
-  try {
-    const data = await getJson(`/api/music/lyric?id=${encodeURIComponent(track.id)}`);
-    if (token !== lyricRequestToken || currentLyricTrackKey !== key) return;
-    currentLyrics = parseLrc(data.lyric || "");
-    lyricLoading = false;
-    lyricCache.set(key, currentLyrics);
-    updateLyricsDisplay();
-  } catch {
-    if (token !== lyricRequestToken || currentLyricTrackKey !== key) return;
-    currentLyrics = [];
-    lyricLoading = false;
-    lyricCache.set(key, currentLyrics);
-    resetLyricsDisplay("暂无歌词");
+  lyricAbortController=new AbortController();
+  const controller=lyricAbortController;
+  for(let attempt=0;attempt<3;attempt++) {
+    if(token!==lyricRequestToken || controller.signal.aborted)return;
+    try {
+      const data=await getJson(`/api/music/lyric?id=${encodeURIComponent(track.id)}`,{
+        signal:AbortSignal.any([controller.signal,AbortSignal.timeout(12000)])});
+      if(token!==lyricRequestToken || currentLyricTrackKey!==key)return;
+      currentLyrics=parseLrc(data.lyric || '');lyricLoading=false;
+      lyricCache.set(key,currentLyrics);updateLyricsDisplay();return;
+    } catch {
+      if(token!==lyricRequestToken || controller.signal.aborted)return;
+      if(attempt<2){
+        await new Promise(resolve=>{
+          const finish=()=>{clearTimeout(timer);controller.signal.removeEventListener('abort',finish);resolve();};
+          const timer=setTimeout(finish,1500*(attempt+1));controller.signal.addEventListener('abort',finish,{once:true});
+        });
+      }
+    }
   }
+  currentLyrics=[];lyricLoading=false;
+  resetLyricsDisplay('歌词加载失败，稍后重试');
 }
 
 function updateLyricsDisplay() {
@@ -2001,6 +2017,7 @@ function clearHostIntroVoiceTimer() {
 function handleVisibilityChange() {
   if (document.hidden) trackWaveform.abort();
   if (!document.hidden) {
+    if(currentTrack && !lyricLoading && !lyricCache.has(trackKey(currentTrack)))void loadCurrentLyrics();
     if(!audio.paused)startSpectrumMeter();
     refreshPlayStateForCurrent();
     mediaControls?.update();
@@ -3391,6 +3408,20 @@ function translateWeatherCode(code) {
   return "未知";
 }
 
+function retryCover(image) {
+  if(!image.matches?.('img.queue-cover') || image.dataset.coverRetryPending)return;
+  image.dataset.coverFailed='1';image.style.opacity='0';
+  const attempt=Number(image.dataset.coverRetries || 0);
+  if(attempt>=2)return;
+  image.dataset.coverRetries=String(attempt+1);image.dataset.coverRetryPending='1';
+  const original=image.src;
+  setTimeout(()=>{
+    delete image.dataset.coverRetryPending;
+    if(!image.isConnected || image.src!==original)return;
+    const url=new URL(original,location.origin);url.searchParams.set('coverRetry',String(attempt+1));image.src=url.href;
+  },1500*(attempt+1));
+}
+
 function renderCover(track) {
   if (!track.cover) {
     return '<div class="queue-cover queue-cover-placeholder" aria-hidden="true"></div>';
@@ -3406,6 +3437,7 @@ function cachedCoverUrl(value) {
     if (url.origin === location.origin || !/^p\d+\.music\.126\.net$/i.test(url.hostname)) return raw;
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return raw;
     url.protocol = 'https:';
+    if(!url.searchParams.has('param'))url.searchParams.set('param','160y160');
     return `/api/music/cover?url=${encodeURIComponent(url.href)}`;
   } catch {
     return raw;
