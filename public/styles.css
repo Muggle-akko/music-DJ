@@ -42,6 +42,18 @@ body {
   color: var(--text-primary);
   font-family: var(--font-ui);
   letter-spacing: 0;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]),
+[role="textbox"] {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button,

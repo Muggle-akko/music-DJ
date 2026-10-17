@@ -1,4 +1,4 @@
-const CACHE_NAME = "awudio-workspace-v33";
+const CACHE_NAME = "awudio-workspace-v34";
 const STATIC_ASSETS = [
   "/styles.css",
   "/app.js",
