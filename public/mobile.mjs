@@ -1,5 +1,5 @@
 import { mobileClient } from '/device-policy.mjs?v=36';
-import { createPlayerMorph } from '/player-morph.mjs?v=49';
+import { createPlayerMorph } from '/player-morph.mjs?v=52';
 export function createMobileWorkspace({getTrack,onLocate}={}) {
   const el=id=>document.getElementById(id);
   const request=document.querySelector('.request-panel'), queue=document.querySelector('.queue-panel');
@@ -7,10 +7,7 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
   request.before(requestSlot);queue.before(queueSlot);
   const deck=el('mobileDeck'),stage=el('mobileDeckStage'),sheet=el('mobileSettings');
   const deckAnchor=document.createElement('div');deckAnchor.className='mobile-deck-anchor';
-  const topStop=document.createElement('div');
-  topStop.className='mobile-top-stop';topStop.setAttribute('aria-hidden','true');topStop.hidden=true;
-  document.body.prepend(topStop);
-  const playerMorph=createPlayerMorph(document.querySelector('.player-panel'));
+  const playerMorph=createPlayerMorph(document.querySelector('.player-panel'),{deck:deckAnchor});
   const settingNodes=['radioSettings'].map(id=>{
     const node=el(id),slot=document.createComment(id);node.before(slot);return {node,slot};
   });
@@ -73,7 +70,6 @@ export function createMobileWorkspace({getTrack,onLocate}={}) {
     const next=mobileClient || matchMedia('(max-width: 860px)').matches;
     if(next===compact)return;
     compact=next;document.body.classList.toggle('compact-player',compact);deck.hidden=!compact;
-    document.documentElement.classList.toggle('mobile-player-snap',compact);topStop.hidden=!compact;
     if(compact){
       document.querySelector('.player-panel').after(deckAnchor);deckAnchor.append(deck);
       ['AI 推荐','搜索','云歌单'].forEach((name,i)=>{tabNames[i].node.textContent=name;});

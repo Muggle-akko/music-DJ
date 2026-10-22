@@ -1,7 +1,7 @@
 import { recentPlayback } from '/recent-playback.mjs?v=46';
 import { createTrackWaveform } from "/waveform.mjs?v=46";
 import { mobileClient } from "/device-policy.mjs?v=36";
-import { createMobileWorkspace } from "/mobile.mjs?v=49";
+import { createMobileWorkspace } from "/mobile.mjs?v=52";
 import { createMediaSession } from "/media-session.mjs?v=36";
 import { browserDataCache, apiFetch } from "/network.mjs?v=46";
 import { createListeningController } from "/listening.mjs?v=36";
